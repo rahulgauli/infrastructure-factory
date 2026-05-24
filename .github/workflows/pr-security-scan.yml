@@ -21,18 +21,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Run Trivy (SCA – filesystem)
+        uses: aquasecurity/trivy-action@0.35.0
         with:
-          python-version: "3.12"
-
-      - name: Install pip-audit
-        run: pip install pip-audit
-
-      - name: Run pip-audit (SCA)
-        id: pip_audit
-        run: |
-          pip-audit -r requirements.txt --format json -o /tmp/sca-results.json || true
+          scan-type: fs
+          scan-ref: .
+          format: json
+          output: ${{ runner.temp }}/sca-results.json
+          scanners: vuln
+          exit-code: "0"
 
       - name: Parse SCA results
         id: summary
@@ -40,31 +37,35 @@ jobs:
           python3 - <<'EOF'
           import json, os
 
+          results_path = os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "sca-results.json")
           try:
-              with open("/tmp/sca-results.json") as f:
+              with open(results_path) as f:
                   data = json.load(f)
           except Exception:
-              data = []
+              data = {}
 
           vulns = []
-          for pkg in data:
-              for v in pkg.get("vulns", []):
+          for result in data.get("Results", []):
+              target = result.get("Target", "")
+              for v in result.get("Vulnerabilities") or []:
                   vulns.append({
-                      "package": pkg.get("name", "unknown"),
-                      "version": pkg.get("version", "unknown"),
-                      "id": v.get("id", ""),
-                      "description": v.get("description", "")[:200],
-                      "fix_versions": ", ".join(v.get("fix_versions", [])) or "N/A",
+                      "package": v.get("PkgName", "unknown"),
+                      "version": v.get("InstalledVersion", "unknown"),
+                      "id": v.get("VulnerabilityID", ""),
+                      "severity": v.get("Severity", "UNKNOWN"),
+                      "description": (v.get("Description") or "")[:200],
+                      "fix_version": v.get("FixedVersion") or "N/A",
+                      "target": target,
                   })
 
           lines = []
           if vulns:
-              lines.append("| # | Package | Version | Vuln ID | Fix Versions | Description |")
-              lines.append("|---|---------|---------|---------|--------------|-------------|")
+              lines.append("| # | Package | Version | Severity | Vuln ID | Fix Version | Target |")
+              lines.append("|---|---------|---------|----------|---------|-------------|--------|")
               for i, v in enumerate(vulns, 1):
-                  desc = v["description"].replace("|", "\\|").replace("\n", " ")
+                  desc_col = v["description"].replace("|", "\\|").replace("\n", " ")
                   lines.append(
-                      f"| {i} | `{v['package']}` | {v['version']} | {v['id']} | {v['fix_versions']} | {desc} |"
+                      f"| {i} | `{v['package']}` | {v['version']} | {v['severity']} | {v['id']} | {v['fix_version']} | `{v['target']}` |"
                   )
               result = "\n".join(lines)
           else:
@@ -82,7 +83,7 @@ jobs:
         if: always()
         with:
           name: sca-results
-          path: /tmp/sca-results.json
+          path: ${{ runner.temp }}/sca-results.json
 
   sast-scan:
     name: SAST – Static Code Analysis
@@ -304,23 +305,25 @@ jobs:
 
             const statusIcon = (count) => count > 0 ? "🔴" : "✅";
 
+            const now = new Date().toUTCString();
             const body = [
               `## 🔍 Security Scan Results`,
               ``,
+              `> 🕐 **Last updated:** ${now}`,
               `> Triggered by commit \`${context.sha.slice(0,7)}\` on PR #${context.issue.number}`,
               ``,
               `### 📊 Summary`,
               ``,
               `| # | Scan Type | Tool(s) | Findings |`,
               `|---|-----------|---------|----------|`,
-              `| 1 | SCA – Dependency Vulnerabilities | pip-audit | ${statusIcon(scaCount)} ${scaCount} |`,
+              `| 1 | SCA – Dependency Vulnerabilities | Trivy | ${statusIcon(scaCount)} ${scaCount} |`,
               `| 2 | SAST – Static Code Analysis | Bandit, Semgrep | ${statusIcon(sastCount)} ${sastCount} |`,
               `| 3 | IaC – Infrastructure as Code | Checkov | ${statusIcon(iacCount)} ${iacCount} |`,
               `| | **Total** | | **${total}** |`,
               ``,
               `---`,
               ``,
-              `### 1️⃣ SCA – Dependency Vulnerability Scan (pip-audit)`,
+              `### 1️⃣ SCA – Dependency Vulnerability Scan (Trivy)`,
               ``,
               process.env.SCA_RESULT,
               ``,
