@@ -461,15 +461,16 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const ref = context.payload.repository.default_branch;
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'copilot-security-autofix.yml',
-              ref: context.ref,
+              ref,
               inputs: {
                 run_id: String(context.runId),
                 head_branch: context.payload.pull_request?.head?.ref || '',
                 head_sha: context.sha,
               }
             });
-            core.info('Dispatched copilot-security-autofix.yml');
+            core.info(`Dispatched copilot-security-autofix.yml on ${ref}`);
