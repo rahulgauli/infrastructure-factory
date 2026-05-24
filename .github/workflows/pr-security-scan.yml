@@ -454,11 +454,12 @@ jobs:
     name: Trigger Copilot Auto-Fix Workflow
     runs-on: ubuntu-latest
     needs: [sca-scan, sast-scan, iac-scan, post-pr-comment]
-    if: >
-      always() &&
-      (fromJSON(needs.sca-scan.outputs.finding_count || '0') +
-       fromJSON(needs.sast-scan.outputs.finding_count || '0') +
-       fromJSON(needs.iac-scan.outputs.finding_count || '0')) > 0
+    if: >-
+      always() && (
+        fromJSON(needs.sca-scan.outputs.finding_count  || '0') > 0 ||
+        fromJSON(needs.sast-scan.outputs.finding_count || '0') > 0 ||
+        fromJSON(needs.iac-scan.outputs.finding_count  || '0') > 0
+      )
     steps:
       - name: Dispatch Copilot Security Auto-Fix
         uses: actions/github-script@v7
