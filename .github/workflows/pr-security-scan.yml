@@ -22,11 +22,23 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies and generate pinned requirements
+        run: |
+          pip install -r requirements.txt -q
+          # Trivy matches on filename "requirements.txt" and needs == pinned versions.
+          # Generate a pinned snapshot from the resolved environment for accurate SCA.
+          pip freeze > ${{ runner.temp }}/requirements.txt
+
       - name: Run Trivy (SCA – filesystem, JSON)
         uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
-          scan-ref: .
+          scan-ref: ${{ runner.temp }}/requirements.txt
           format: json
           output: ${{ runner.temp }}/sca-results.json
           scanners: vuln
@@ -36,7 +48,7 @@ jobs:
         uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
-          scan-ref: .
+          scan-ref: ${{ runner.temp }}/requirements.txt
           format: sarif
           output: ${{ runner.temp }}/sca-results.sarif
           scanners: vuln
