@@ -1,0 +1,260 @@
+name: Copilot Security Auto-Fix
+
+on:
+  workflow_run:
+    workflows: ["PR Security Scan"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+  actions: read
+
+jobs:
+  trigger-copilot-fix:
+    name: Trigger Copilot Auto-Fix for Security Findings
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.conclusion != 'cancelled'
+      && github.event.workflow_run.event == 'pull_request'
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+          fetch-depth: 0
+
+      - name: Resolve PR number and fetch scan comment
+        id: context
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // --- 1. Resolve the pull request number ---------------------------------
+            const headSha  = context.payload.workflow_run.head_sha;
+            const headRepo = context.payload.workflow_run.head_repository;
+
+            const { data: pulls } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'open',
+              head:  `${headRepo.owner.login}:${context.payload.workflow_run.head_branch}`,
+            });
+
+            if (!pulls.length) {
+              core.setOutput('has_findings', 'false');
+              core.info('No open PR found for this workflow run — skipping.');
+              return;
+            }
+            const prNumber = pulls[0].number;
+            core.setOutput('pr_number', String(prNumber));
+            core.info(`Resolved PR #${prNumber}`);
+
+            // --- 2. Find the security-scan bot comment on the PR --------------------
+            const marker = '<!-- pr-security-scan -->';
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: prNumber,
+              per_page:     100,
+            });
+
+            const scanComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.startsWith(marker)
+            );
+
+            if (!scanComment) {
+              core.setOutput('has_findings', 'false');
+              core.info('No security scan comment found on the PR — skipping.');
+              return;
+            }
+
+            // --- 3. Check whether the scan actually has findings ---------------------
+            const noFindingsPatterns = [
+              '_No vulnerable dependencies found._',
+              '_No SAST findings at the configured severity thresholds._',
+              '_No IaC policy violations found._',
+            ];
+
+            const body = scanComment.body;
+            const allClean = noFindingsPatterns.every(p => body.includes(p));
+
+            if (allClean) {
+              core.setOutput('has_findings', 'false');
+              core.info('All scans are clean — no auto-fix needed.');
+              return;
+            }
+
+            core.setOutput('has_findings', 'true');
+
+            // --- 4. Persist the scan report for later steps -------------------------
+            const fs = require('fs');
+            fs.writeFileSync('/tmp/scan-report.md', body);
+            core.info(`Scan report saved (${body.length} chars).`);
+
+      - name: Collect repository LLM context
+        if: steps.context.outputs.has_findings == 'true'
+        id: llm_context
+        run: |
+          CONTEXT_FILE="/tmp/repo-context.md"
+          {
+            echo "# Repository Context for Copilot Auto-Fix"
+            echo ""
+
+            # Copilot instructions
+            if [ -f .github/copilot-instructions.md ]; then
+              echo "## Copilot Instructions"
+              echo ""
+              cat .github/copilot-instructions.md
+              echo ""
+            fi
+
+            echo "---"
+            echo ""
+
+            # Knowledge graph (summarised)
+            if [ -f .github/knowledge-graph.json ]; then
+              echo "## Knowledge Graph"
+              echo ""
+              echo '```json'
+              cat .github/knowledge-graph.json
+              echo '```'
+              echo ""
+            fi
+
+            echo "---"
+            echo ""
+
+            # Copilot review policy
+            if [ -f .github/policies/copilot-review-policy.yml ]; then
+              echo "## Copilot Review Policy"
+              echo ""
+              echo '```yaml'
+              cat .github/policies/copilot-review-policy.yml
+              echo '```'
+              echo ""
+            fi
+
+            echo "---"
+            echo ""
+
+            # Rego policies
+            echo "## OPA Rego Policies"
+            echo ""
+            for f in policies/terraform/*.rego; do
+              if [ -f "$f" ]; then
+                echo "### $(basename "$f")"
+                echo ""
+                echo '```rego'
+                cat "$f"
+                echo '```'
+                echo ""
+              fi
+            done
+
+            echo "---"
+            echo ""
+
+            # Requirements
+            if [ -f requirements.txt ]; then
+              echo "## Python Dependencies (requirements.txt)"
+              echo ""
+              echo '```'
+              cat requirements.txt
+              echo '```'
+              echo ""
+            fi
+          } > "$CONTEXT_FILE"
+
+          echo "context_file=$CONTEXT_FILE" >> "$GITHUB_OUTPUT"
+          echo "Context file written ($(wc -c < "$CONTEXT_FILE") bytes)."
+
+      - name: Build and create Copilot fix issue
+        if: steps.context.outputs.has_findings == 'true'
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.context.outputs.pr_number }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+
+            const prNumber   = process.env.PR_NUMBER;
+            const headBranch = process.env.HEAD_BRANCH;
+
+            // Read collected context files
+            const scanReport = fs.readFileSync('/tmp/scan-report.md', 'utf8');
+            const repoContext = fs.readFileSync('/tmp/repo-context.md', 'utf8');
+
+            // Build the issue body — this is the prompt for the Copilot agent
+            const issueBody = [
+              `## Security Auto-Fix Request`,
+              ``,
+              `> Automatically generated by the **Copilot Security Auto-Fix** workflow.`,
+              `> Source PR: #${prNumber} (branch: \`${headBranch}\`)`,
+              ``,
+              `---`,
+              ``,
+              `### Instructions`,
+              ``,
+              `The **PR Security Scan** workflow detected findings on PR #${prNumber}.`,
+              `Please analyze the scan report and the repository context below, then create`,
+              `a fix PR **against the \`${headBranch}\` branch** that resolves the security`,
+              `findings. Follow the repository conventions described in the context section.`,
+              ``,
+              `**Important guidelines:**`,
+              `- Fix only the findings reported in the scan — do not refactor unrelated code.`,
+              `- For SCA (dependency) findings: update the vulnerable packages in \`requirements.txt\` to the recommended fix versions.`,
+              `- For SAST findings: apply the minimal code change that resolves the issue while preserving existing behavior.`,
+              `- For IaC findings: update the Terraform modules to comply with security best practices and the OPA Rego policies.`,
+              `- Run \`python -m pytest tests/ -v\` to verify your changes do not break existing tests.`,
+              `- Reference PR #${prNumber} in the fix PR description.`,
+              ``,
+              `---`,
+              ``,
+              `### Security Scan Report`,
+              ``,
+              scanReport,
+              ``,
+              `---`,
+              ``,
+              `### Repository Context`,
+              ``,
+              `<details>`,
+              `<summary>Click to expand full repository context</summary>`,
+              ``,
+              repoContext,
+              ``,
+              `</details>`,
+            ].join('\n');
+
+            // Create the issue and assign it to Copilot
+            const { data: issue } = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              title: `🔒 Security Auto-Fix: Resolve scan findings from PR #${prNumber}`,
+              body:  issueBody,
+              labels: ['security', 'copilot-autofix'],
+              assignees: ['copilot'],
+            });
+
+            core.info(`Created issue #${issue.number}: ${issue.html_url}`);
+
+            // Post a notification comment on the original PR
+            await github.rest.issues.createComment({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: parseInt(prNumber),
+              body: [
+                `## 🤖 Copilot Security Auto-Fix Triggered`,
+                ``,
+                `The security scan found actionable findings on this PR.`,
+                `A Copilot auto-fix task has been created: #${issue.number}`,
+                ``,
+                `Copilot will open a fix PR against \`${headBranch}\` shortly.`,
+              ].join('\n'),
+            });
