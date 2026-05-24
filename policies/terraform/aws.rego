@@ -183,6 +183,20 @@ warn[msg] {
 	)
 }
 
+# ── SQS ──────────────────────────────────────────────────────────────────────
+
+deny[msg] {
+	queue := input.resource.aws_sqs_queue[name]
+	not queue.kms_master_key_id
+	msg := sprintf("aws_sqs_queue.%s: kms_master_key_id must be set for server-side encryption", [name])
+}
+
+warn[msg] {
+	queue := input.resource.aws_sqs_queue[name]
+	not queue.redrive_policy
+	msg := sprintf("aws_sqs_queue.%s: redrive_policy should be configured to route failed messages to a dead-letter queue", [name])
+}
+
 # ── CloudTrail ───────────────────────────────────────────────────────────────
 
 deny[msg] {

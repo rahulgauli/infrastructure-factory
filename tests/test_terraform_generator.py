@@ -71,3 +71,43 @@ def test_generate_references_requested_resource_modules() -> None:
         assert '../../terraform/modules/aws/s3' in main_tf
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def build_sqs_request() -> InfrastructureRequest:
+    return InfrastructureRequest(
+        team_name="platform",
+        cloud_provider=CloudProvider.AWS,
+        environment=Environment.DEV,
+        region="us-east-1",
+        resources=[ResourceType.SQS],
+        tags={"owner": "platform"},
+        enable_security_baseline=True,
+    )
+
+
+def test_generate_includes_sqs_module_block() -> None:
+    generator = TerraformGenerator()
+    output_dir = ARTIFACT_ROOT / f"generator-{uuid4().hex}"
+
+    try:
+        generated_path = Path(generator.generate(build_sqs_request(), str(output_dir)))
+        main_tf = (generated_path / "main.tf").read_text(encoding="utf-8")
+        assert 'module "sqs"' in main_tf
+        assert '../../terraform/modules/aws/sqs' in main_tf
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_generate_sqs_includes_standard_variables() -> None:
+    generator = TerraformGenerator()
+    output_dir = ARTIFACT_ROOT / f"generator-{uuid4().hex}"
+
+    try:
+        generated_path = Path(generator.generate(build_sqs_request(), str(output_dir)))
+        main_tf = (generated_path / "main.tf").read_text(encoding="utf-8")
+        assert 'team_name   = var.team_name' in main_tf
+        assert 'environment = var.environment' in main_tf
+        assert 'region      = var.region' in main_tf
+        assert 'tags        = var.tags' in main_tf
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)

@@ -22,6 +22,7 @@ class ResourceType(str, Enum):
     S3 = "s3"
     RDS = "rds"
     EKS = "eks"
+    SQS = "sqs"
     GKE = "gke"
     STORAGE = "storage"
     VNET = "vnet"
