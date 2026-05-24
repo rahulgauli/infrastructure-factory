@@ -147,39 +147,40 @@ deny[msg] {
 	msg := sprintf("aws_s3_bucket_public_access_block.%s: restrict_public_buckets must be true", [name])
 }
 
-# Every aws_s3_bucket must have a corresponding aws_s3_bucket_public_access_block in the same file
+# Every aws_s3_bucket must have a corresponding aws_s3_bucket_public_access_block in the same file.
+# Count-based check to handle multiple buckets: each bucket must have exactly one access block.
 deny[msg] {
-	input.resource.aws_s3_bucket[name]
-	not bucket_has_public_access_block
-	msg := sprintf("aws_s3_bucket.%s: no aws_s3_bucket_public_access_block resource found in this file", [name])
-}
-
-bucket_has_public_access_block {
-	input.resource.aws_s3_bucket_public_access_block[_]
+	bucket_names := {k | input.resource.aws_s3_bucket[k]}
+	pab_names := {k | input.resource.aws_s3_bucket_public_access_block[k]}
+	count(bucket_names) > count(pab_names)
+	msg := sprintf(
+		"Found %d aws_s3_bucket resource(s) but only %d aws_s3_bucket_public_access_block resource(s) – every S3 bucket must have a public access block",
+		[count(bucket_names), count(pab_names)],
+	)
 }
 
 # ── S3 Encryption ────────────────────────────────────────────────────────────
 
 deny[msg] {
-	input.resource.aws_s3_bucket[name]
-	not bucket_has_encryption
-	msg := sprintf("aws_s3_bucket.%s: no aws_s3_bucket_server_side_encryption_configuration resource found in this file", [name])
-}
-
-bucket_has_encryption {
-	input.resource.aws_s3_bucket_server_side_encryption_configuration[_]
+	bucket_names := {k | input.resource.aws_s3_bucket[k]}
+	enc_names := {k | input.resource.aws_s3_bucket_server_side_encryption_configuration[k]}
+	count(bucket_names) > count(enc_names)
+	msg := sprintf(
+		"Found %d aws_s3_bucket resource(s) but only %d aws_s3_bucket_server_side_encryption_configuration resource(s) – every S3 bucket must have server-side encryption configured",
+		[count(bucket_names), count(enc_names)],
+	)
 }
 
 # ── S3 Versioning ────────────────────────────────────────────────────────────
 
 warn[msg] {
-	input.resource.aws_s3_bucket[name]
-	not bucket_has_versioning
-	msg := sprintf("aws_s3_bucket.%s: no aws_s3_bucket_versioning resource found in this file", [name])
-}
-
-bucket_has_versioning {
-	input.resource.aws_s3_bucket_versioning[_]
+	bucket_names := {k | input.resource.aws_s3_bucket[k]}
+	ver_names := {k | input.resource.aws_s3_bucket_versioning[k]}
+	count(bucket_names) > count(ver_names)
+	msg := sprintf(
+		"Found %d aws_s3_bucket resource(s) but only %d aws_s3_bucket_versioning resource(s) – every S3 bucket should have versioning enabled",
+		[count(bucket_names), count(ver_names)],
+	)
 }
 
 # ── CloudTrail ───────────────────────────────────────────────────────────────
