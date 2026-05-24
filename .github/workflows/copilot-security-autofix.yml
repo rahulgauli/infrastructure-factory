@@ -26,14 +26,17 @@ jobs:
           ref: ${{ github.event.workflow_run.head_branch }}
           fetch-depth: 0
 
-      - name: Resolve PR number and fetch scan comment
+      - name: Resolve PR number and download scan artifacts
         id: context
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const fs   = require('fs');
+            const path = require('path');
+            const runId = context.payload.workflow_run.id;
+
             // --- 1. Resolve the pull request number ---------------------------------
-            const headSha  = context.payload.workflow_run.head_sha;
             const headRepo = context.payload.workflow_run.head_repository;
 
             const { data: pulls } = await github.rest.pulls.list({
@@ -52,37 +55,74 @@ jobs:
             core.setOutput('pr_number', String(prNumber));
             core.info(`Resolved PR #${prNumber}`);
 
-            // --- 2. Find the security-scan bot comment on the PR --------------------
-            const marker = '<!-- pr-security-scan -->';
-
-            const { data: comments } = await github.rest.issues.listComments({
-              owner:        context.repo.owner,
-              repo:         context.repo.repo,
-              issue_number: prNumber,
-              per_page:     100,
+            // --- 2. Download *-comment.md artifacts from the triggering run ---------
+            // This is more reliable than parsing the PR comment body, which may not
+            // yet be visible or may show "no findings" if the artifact download failed.
+            const { data: artifactList } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner:  context.repo.owner,
+              repo:   context.repo.repo,
+              run_id: runId,
             });
 
-            const scanComment = comments.find(c =>
-              c.user.type === 'Bot' && c.body.startsWith(marker)
-            );
-
-            if (!scanComment) {
-              core.setOutput('has_findings', 'false');
-              core.info('No security scan comment found on the PR — skipping.');
-              return;
-            }
-
-            // --- 3. Check whether the scan actually has findings ---------------------
             const noFindingsPatterns = [
               '_No vulnerable dependencies found._',
               '_No SAST findings at the configured severity thresholds._',
               '_No IaC policy violations found._',
             ];
 
-            const body = scanComment.body;
-            const allClean = noFindingsPatterns.every(p => body.includes(p));
+            const wantedArtifacts = ['sca-results', 'sast-results', 'iac-results'];
+            const commentFiles    = {
+              'sca-results':  'sca-comment.md',
+              'sast-results': 'sast-comment.md',
+              'iac-results':  'iac-comment.md',
+            };
 
-            if (allClean) {
+            fs.mkdirSync('/tmp/scan-artifacts', { recursive: true });
+
+            let totalFindings = 0;
+            const sectionReports = {};
+
+            for (const artifactName of wantedArtifacts) {
+              const artifact = artifactList.artifacts.find(a => a.name === artifactName);
+              if (!artifact) {
+                core.warning(`Artifact '${artifactName}' not found in run ${runId}`);
+                sectionReports[artifactName] = noFindingsPatterns[wantedArtifacts.indexOf(artifactName)];
+                continue;
+              }
+
+              // Download the zip
+              const { data: zipData } = await github.rest.actions.downloadArtifact({
+                owner:       context.repo.owner,
+                repo:        context.repo.repo,
+                artifact_id: artifact.id,
+                archive_format: 'zip',
+              });
+
+              const zipPath = `/tmp/scan-artifacts/${artifactName}.zip`;
+              fs.writeFileSync(zipPath, Buffer.from(zipData));
+
+              // Unzip (use shell via exec)
+              const { execSync } = require('child_process');
+              const extractDir = `/tmp/scan-artifacts/${artifactName}`;
+              fs.mkdirSync(extractDir, { recursive: true });
+              execSync(`unzip -o ${zipPath} -d ${extractDir}`);
+
+              // Read the comment markdown file
+              const commentFile = path.join(extractDir, commentFiles[artifactName]);
+              if (fs.existsSync(commentFile)) {
+                const content = fs.readFileSync(commentFile, 'utf8').trim();
+                sectionReports[artifactName] = content;
+                // Any content that is NOT a "no findings" message means there are findings
+                const isClean = noFindingsPatterns.some(p => content === p);
+                if (!isClean) totalFindings++;
+                core.info(`${artifactName}: ${isClean ? 'clean' : 'HAS FINDINGS'}`);
+              } else {
+                core.warning(`Comment file not found in artifact: ${commentFile}`);
+                sectionReports[artifactName] = noFindingsPatterns[wantedArtifacts.indexOf(artifactName)];
+              }
+            }
+
+            if (totalFindings === 0) {
               core.setOutput('has_findings', 'false');
               core.info('All scans are clean — no auto-fix needed.');
               return;
@@ -90,10 +130,23 @@ jobs:
 
             core.setOutput('has_findings', 'true');
 
-            // --- 4. Persist the scan report for later steps -------------------------
-            const fs = require('fs');
-            fs.writeFileSync('/tmp/scan-report.md', body);
-            core.info(`Scan report saved (${body.length} chars).`);
+            // --- 3. Build the scan report from artifact content ---------------------
+            const report = [
+              '### 1️⃣ SCA – Dependency Vulnerability Scan (Trivy)',
+              '',
+              sectionReports['sca-results'],
+              '',
+              '### 2️⃣ SAST – Static Code Analysis (Bandit + Semgrep)',
+              '',
+              sectionReports['sast-results'],
+              '',
+              '### 3️⃣ IaC – Infrastructure as Code Scan (Checkov)',
+              '',
+              sectionReports['iac-results'],
+            ].join('\n');
+
+            fs.writeFileSync('/tmp/scan-report.md', report);
+            core.info(`Scan report saved (${report.length} chars).`);
 
       - name: Collect repository LLM context
         if: steps.context.outputs.has_findings == 'true'
