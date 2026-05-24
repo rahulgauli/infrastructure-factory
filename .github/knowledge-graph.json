@@ -1,0 +1,323 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Infrastructure Factory — Repository Knowledge Graph",
+  "description": "Structured representation of the codebase entities, their attributes, and the relationships between them. Intended as context for AI assistants and documentation tools.",
+  "version": "1.0.0",
+  "entities": {
+    "application": {
+      "id": "infrastructure-factory",
+      "type": "FastAPI application",
+      "description": "Self-service infrastructure generation service. Generates opinionated Terraform stacks for AWS, GCP, and Azure with enterprise security controls.",
+      "entrypoint": "app/main.py",
+      "runtime": "Python 3.12",
+      "framework": "FastAPI",
+      "config": "app/core/config.py",
+      "settings_model": "Settings (pydantic-settings BaseSettings)",
+      "settings_loader": "get_settings() — @lru_cache(maxsize=1)",
+      "environment_variables": [
+        { "name": "APP_NAME", "default": "Infrastructure Factory" },
+        { "name": "APP_VERSION", "default": "1.0.0" },
+        { "name": "DEBUG", "default": "False" },
+        { "name": "GENERATED_DIR", "default": "generated" },
+        { "name": "TERRAFORM_BIN", "default": "terraform" },
+        { "name": "MAX_CONCURRENT_EXECUTIONS", "default": "5" }
+      ]
+    },
+
+    "api_routers": [
+      {
+        "id": "router.infrastructure",
+        "file": "app/api/routes/infrastructure.py",
+        "prefix": "/api/v1/infrastructure",
+        "tags": ["infrastructure"],
+        "endpoints": [
+          { "method": "POST",   "path": "/",                       "description": "Create infrastructure request and generate Terraform", "response_model": "InfrastructureResponse", "status_code": 201 },
+          { "method": "GET",    "path": "/",                       "description": "List all infrastructure requests",                     "response_model": "list[InfrastructureResponse]" },
+          { "method": "GET",    "path": "/{infrastructure_id}",    "description": "Get a specific infrastructure request by ID",          "response_model": "InfrastructureResponse" },
+          { "method": "POST",   "path": "/{infrastructure_id}/plan",    "description": "Run terraform plan",    "response_model": "InfrastructureResponse", "async": true },
+          { "method": "POST",   "path": "/{infrastructure_id}/apply",   "description": "Run terraform apply",   "response_model": "InfrastructureResponse", "async": true },
+          { "method": "DELETE", "path": "/{infrastructure_id}",    "description": "Run terraform destroy and remove request",            "async": true }
+        ],
+        "dependencies": ["TerraformGenerator", "TerraformExecutor", "get_settings", "INFRASTRUCTURE_STORE"]
+      },
+      {
+        "id": "router.providers",
+        "file": "app/api/routes/providers.py",
+        "prefix": "/api/v1/providers",
+        "tags": ["providers"],
+        "endpoints": [
+          { "method": "GET", "path": "/",           "description": "List all supported providers and their resource types" },
+          { "method": "GET", "path": "/{provider}", "description": "Get resource types for a specific provider" }
+        ],
+        "data": "SUPPORTED_PROVIDER_RESOURCES"
+      },
+      {
+        "id": "router.health",
+        "file": "app/main.py",
+        "endpoints": [
+          { "method": "GET", "path": "/health", "description": "Health check — returns {status: ok}" }
+        ]
+      }
+    ],
+
+    "models": [
+      {
+        "id": "model.CloudProvider",
+        "file": "app/models/infrastructure.py",
+        "type": "Enum (str)",
+        "values": ["aws", "gcp", "azure"]
+      },
+      {
+        "id": "model.Environment",
+        "file": "app/models/infrastructure.py",
+        "type": "Enum (str)",
+        "values": ["dev", "staging", "prod"]
+      },
+      {
+        "id": "model.ResourceType",
+        "file": "app/models/infrastructure.py",
+        "type": "Enum (str)",
+        "values": ["vpc", "ec2", "s3", "rds", "eks", "gke", "storage", "vnet", "aks"],
+        "provider_mapping": {
+          "aws":   ["vpc", "ec2", "s3", "rds", "eks"],
+          "gcp":   ["vpc", "gke", "storage"],
+          "azure": ["vnet", "aks", "storage"]
+        }
+      },
+      {
+        "id": "model.InfrastructureStatus",
+        "file": "app/models/infrastructure.py",
+        "type": "Enum (str)",
+        "values": ["pending", "generated", "planned", "applied", "failed"]
+      },
+      {
+        "id": "model.InfrastructureRequest",
+        "file": "app/models/infrastructure.py",
+        "type": "Pydantic BaseModel",
+        "fields": [
+          { "name": "team_name",               "type": "str" },
+          { "name": "cloud_provider",          "type": "CloudProvider" },
+          { "name": "environment",             "type": "Environment" },
+          { "name": "region",                  "type": "str" },
+          { "name": "resources",               "type": "list[ResourceType]" },
+          { "name": "tags",                    "type": "dict[str, str]", "default": "{}" },
+          { "name": "enable_security_baseline","type": "bool",           "default": true }
+        ]
+      },
+      {
+        "id": "model.InfrastructureResponse",
+        "file": "app/models/infrastructure.py",
+        "type": "Pydantic BaseModel",
+        "fields": [
+          { "name": "id",             "type": "str" },
+          { "name": "team_name",      "type": "str" },
+          { "name": "cloud_provider", "type": "str" },
+          { "name": "environment",    "type": "str" },
+          { "name": "status",         "type": "str" },
+          { "name": "generated_path", "type": "str | None" },
+          { "name": "plan_output",    "type": "str | None" },
+          { "name": "created_at",     "type": "datetime" },
+          { "name": "updated_at",     "type": "datetime" }
+        ]
+      }
+    ],
+
+    "services": [
+      {
+        "id": "service.TerraformGenerator",
+        "file": "app/services/terraform_generator.py",
+        "description": "Renders Terraform configuration files (main.tf, variables.tf, terraform.tfvars.json) for a given InfrastructureRequest.",
+        "public_methods": [
+          {
+            "name": "generate",
+            "signature": "(request: InfrastructureRequest, output_dir: str) -> str",
+            "description": "Renders all Terraform files into output_dir and returns the resolved path."
+          }
+        ],
+        "private_methods": [
+          "_resolve_output_dir — validates path is relative and contains no '..' components",
+          "_render_main_tf    — assembles terraform block + locals + security module + resource modules",
+          "_render_variables_tf — renders shared variable declarations",
+          "_terraform_block   — provider-specific terraform{} and provider{} HCL blocks",
+          "_locals_block      — provider-specific locals{} HCL block",
+          "_security_module_block — security baseline module{} block per provider",
+          "_resource_module_block — workload module{} block per provider and resource type"
+        ],
+        "output_files": ["main.tf", "variables.tf", "terraform.tfvars.json"],
+        "output_dir_pattern": "generated/<team_name_slug>/<uuid>/"
+      },
+      {
+        "id": "service.TerraformExecutor",
+        "file": "app/services/terraform_executor.py",
+        "description": "Async wrapper around the terraform CLI. Shells out using asyncio.create_subprocess_exec.",
+        "public_methods": [
+          { "name": "init",    "signature": "(work_dir: str) -> tuple[int, str]" },
+          { "name": "plan",    "signature": "(work_dir: str) -> tuple[int, str]" },
+          { "name": "apply",   "signature": "(work_dir: str) -> tuple[int, str]" },
+          { "name": "destroy", "signature": "(work_dir: str) -> tuple[int, str]" }
+        ],
+        "notes": "stdout and stderr are merged into a single stream. Return value is (returncode, combined_output)."
+      }
+    ],
+
+    "state": {
+      "id": "state.INFRASTRUCTURE_STORE",
+      "file": "app/api/routes/infrastructure.py",
+      "type": "dict[str, InfrastructureRecord]",
+      "description": "In-memory store mapping infrastructure_id to InfrastructureRecord. Not persisted across restarts.",
+      "concurrency": "Protected for Terraform execution via execution_semaphore; no lock on dict reads/writes (single-process)."
+    },
+
+    "terraform_modules": {
+      "aws": {
+        "workload": [
+          { "name": "vpc",  "path": "terraform/modules/aws/vpc" },
+          { "name": "ec2",  "path": "terraform/modules/aws/ec2" },
+          { "name": "s3",   "path": "terraform/modules/aws/s3" },
+          { "name": "rds",  "path": "terraform/modules/aws/rds" },
+          { "name": "eks",  "path": "terraform/modules/aws/eks" }
+        ],
+        "security_baseline": { "path": "terraform/modules/security/aws" }
+      },
+      "gcp": {
+        "workload": [
+          { "name": "vpc",     "path": "terraform/modules/gcp/vpc" },
+          { "name": "gke",     "path": "terraform/modules/gcp/gke" },
+          { "name": "storage", "path": "terraform/modules/gcp/storage" }
+        ],
+        "security_baseline": { "path": "terraform/modules/security/gcp" }
+      },
+      "azure": {
+        "workload": [
+          { "name": "vnet",    "path": "terraform/modules/azure/vnet" },
+          { "name": "aks",     "path": "terraform/modules/azure/aks" },
+          { "name": "storage", "path": "terraform/modules/azure/storage" }
+        ],
+        "security_baseline": { "path": "terraform/modules/security/azure" }
+      }
+    },
+
+    "rego_policies": [
+      {
+        "id": "policy.aws",
+        "file": "policies/terraform/aws.rego",
+        "package": "terraform.aws",
+        "resource_types": ["aws_instance", "aws_db_instance", "aws_eks_cluster", "aws_security_group", "aws_s3_bucket", "aws_s3_bucket_public_access_block", "aws_s3_bucket_server_side_encryption_configuration", "aws_s3_bucket_versioning", "aws_cloudtrail"],
+        "rule_sets": ["deny", "warn"]
+      },
+      {
+        "id": "policy.gcp",
+        "file": "policies/terraform/gcp.rego",
+        "package": "terraform.gcp",
+        "resource_types": ["google_container_cluster", "google_container_node_pool", "google_storage_bucket"],
+        "rule_sets": ["deny", "warn"]
+      },
+      {
+        "id": "policy.azure",
+        "file": "policies/terraform/azure.rego",
+        "package": "terraform.azure",
+        "resource_types": ["azurerm_storage_account", "azurerm_kubernetes_cluster", "azurerm_key_vault", "azurerm_log_analytics_workspace"],
+        "rule_sets": ["deny", "warn"]
+      }
+    ],
+
+    "ci_workflows": [
+      {
+        "id": "workflow.pr-security-scan",
+        "file": ".github/workflows/pr-security-scan.yml",
+        "trigger": "pull_request → main, master",
+        "jobs": [
+          { "name": "sca-scan",   "tool": "Trivy",            "description": "Software composition analysis — dependency vulnerabilities" },
+          { "name": "sast-scan",  "tools": ["Bandit", "Semgrep"], "description": "Static application security testing — Python code" },
+          { "name": "iac-scan",   "tool": "Checkov",          "description": "Infrastructure as Code analysis — Terraform + Dockerfile" },
+          { "name": "post-pr-comment", "description": "Aggregates all scan results and posts/updates a single PR comment" }
+        ]
+      },
+      {
+        "id": "workflow.terraform-policy",
+        "file": ".github/workflows/terraform-policy.yml",
+        "trigger": "pull_request → main, master (paths: terraform/**, policies/**)",
+        "jobs": [
+          { "name": "terraform-policy", "tool": "conftest", "description": "Evaluates all .tf files against Rego policies with --parser hcl2 --all-namespaces" },
+          { "name": "post-pr-comment",  "description": "Posts policy violation table as a PR comment" }
+        ]
+      }
+    ],
+
+    "tests": [
+      {
+        "id": "test.infrastructure_api",
+        "file": "tests/test_infrastructure_api.py",
+        "description": "API integration tests using httpx.AsyncClient + ASGITransport",
+        "covers": ["POST /api/v1/infrastructure/", "GET /api/v1/infrastructure/", "GET /api/v1/infrastructure/{id}", "GET /health", "GET /api/v1/providers/", "GET /api/v1/providers/{provider}"]
+      },
+      {
+        "id": "test.terraform_generator",
+        "file": "tests/test_terraform_generator.py",
+        "description": "Unit tests for TerraformGenerator HCL output correctness",
+        "covers": ["main.tf rendering per provider", "security baseline injection", "resource module blocks", "variables.tf", "terraform.tfvars.json"]
+      }
+    ]
+  },
+
+  "relationships": [
+    { "from": "router.infrastructure",       "to": "service.TerraformGenerator", "type": "uses",     "description": "Calls generator.generate() on POST /api/v1/infrastructure/" },
+    { "from": "router.infrastructure",       "to": "service.TerraformExecutor",  "type": "uses",     "description": "Calls executor.init/plan/apply/destroy for lifecycle operations" },
+    { "from": "router.infrastructure",       "to": "state.INFRASTRUCTURE_STORE", "type": "reads/writes", "description": "Persists and retrieves InfrastructureRecord objects" },
+    { "from": "router.infrastructure",       "to": "router.providers",           "type": "imports",  "description": "Imports get_supported_resources() for resource validation" },
+    { "from": "service.TerraformGenerator",  "to": "model.InfrastructureRequest","type": "consumes", "description": "Reads provider, resources, enable_security_baseline, tags" },
+    { "from": "service.TerraformExecutor",   "to": "application",                "type": "reads config", "description": "Reads terraform_bin from Settings via get_settings()" },
+    { "from": "workflow.pr-security-scan",   "to": "application",                "type": "scans",    "description": "Scans app/ Python code and requirements.txt on every PR" },
+    { "from": "workflow.terraform-policy",   "to": "terraform_modules",          "type": "validates","description": "Runs conftest against all .tf files in terraform/" },
+    { "from": "workflow.terraform-policy",   "to": "rego_policies",              "type": "uses",     "description": "Loads policies from policies/terraform/*.rego" },
+    { "from": "test.infrastructure_api",     "to": "router.infrastructure",      "type": "tests" },
+    { "from": "test.infrastructure_api",     "to": "router.providers",           "type": "tests" },
+    { "from": "test.terraform_generator",    "to": "service.TerraformGenerator", "type": "tests" }
+  ],
+
+  "data_flows": [
+    {
+      "flow": "infrastructure-generation",
+      "steps": [
+        "Client → POST /api/v1/infrastructure/ with InfrastructureRequest",
+        "router.infrastructure validates resources via get_supported_resources()",
+        "router.infrastructure assigns UUID, computes output_dir path",
+        "TerraformGenerator.generate() renders main.tf, variables.tf, terraform.tfvars.json",
+        "InfrastructureResponse(status=generated) stored in INFRASTRUCTURE_STORE",
+        "Response returned to client with generated_path"
+      ]
+    },
+    {
+      "flow": "terraform-plan",
+      "steps": [
+        "Client → POST /api/v1/infrastructure/{id}/plan",
+        "router.infrastructure looks up record in INFRASTRUCTURE_STORE",
+        "Acquires execution_semaphore",
+        "TerraformExecutor.init(generated_path) → (returncode, output)",
+        "If init fails: status=failed, returns early",
+        "TerraformExecutor.plan(generated_path) → (returncode, output)",
+        "Releases semaphore",
+        "status=planned or failed; plan_output stored; updated_at refreshed"
+      ]
+    },
+    {
+      "flow": "terraform-apply",
+      "steps": [
+        "Client → POST /api/v1/infrastructure/{id}/apply",
+        "Same init + semaphore pattern as plan",
+        "TerraformExecutor.apply(generated_path) with -auto-approve",
+        "status=applied or failed"
+      ]
+    },
+    {
+      "flow": "terraform-destroy",
+      "steps": [
+        "Client → DELETE /api/v1/infrastructure/{id}",
+        "TerraformExecutor.destroy(generated_path) with -auto-approve",
+        "If destroy fails: status=failed, raises HTTP 500",
+        "shutil.rmtree(generated_path) removes generated files",
+        "Record removed from INFRASTRUCTURE_STORE"
+      ]
+    }
+  ]
+}

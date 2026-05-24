@@ -1,0 +1,231 @@
+# Copilot Code Review Policy — Infrastructure Factory
+#
+# This file defines rules that GitHub Copilot and AI code review tools should
+# enforce when reviewing pull requests in this repository.
+# Structure: each top-level key is a policy domain; each rule has an id,
+# severity (error | warning | info), a description, and optional guidance.
+
+version: "1.0"
+
+##############################################################################
+# Python / FastAPI application
+##############################################################################
+python:
+  - id: PY001
+    severity: error
+    description: >
+      All Pydantic models must use pydantic v2 BaseModel. Do not import from
+      pydantic.v1 or use deprecated validator/root_validator decorators.
+    guidance: Use `model_validator`, `field_validator`, and `Field` from pydantic v2.
+
+  - id: PY002
+    severity: error
+    description: >
+      FastAPI route handlers that perform I/O (Terraform CLI calls, file reads)
+      must be declared `async`. Synchronous routes must not block the event loop.
+    guidance: Use `async def` for routes that call TerraformExecutor methods.
+
+  - id: PY003
+    severity: error
+    description: >
+      Output directory paths passed to TerraformGenerator must be relative and
+      must not contain `..` components. Absolute paths must be rejected.
+    guidance: |
+      The `_resolve_output_dir` method in TerraformGenerator enforces this.
+      Do not bypass or weaken this check in any code path.
+
+  - id: PY004
+    severity: error
+    description: >
+      HTTP exceptions must be raised using `fastapi.HTTPException`. Internal
+      exceptions must not propagate to the HTTP response layer.
+    guidance: Wrap unexpected errors in HTTPException with an appropriate status code.
+
+  - id: PY005
+    severity: warning
+    description: >
+      Application settings must be accessed via `get_settings()` (LRU-cached).
+      Do not instantiate `Settings()` directly in route handlers or services.
+    guidance: Import and call `from app.core.config import get_settings`.
+
+  - id: PY006
+    severity: warning
+    description: >
+      New route handlers must be registered on an `APIRouter` (not directly on
+      the FastAPI `app`), with an explicit `prefix` and `tags` list.
+    guidance: |
+      Follow the pattern in `app/api/routes/infrastructure.py` and
+      `app/api/routes/providers.py`.
+
+  - id: PY007
+    severity: error
+    description: >
+      Concurrent Terraform operations must be guarded by `execution_semaphore`
+      to respect `MAX_CONCURRENT_EXECUTIONS`.
+    guidance: Use `async with execution_semaphore:` around any executor call.
+
+  - id: PY008
+    severity: warning
+    description: >
+      Use built-in generic types (`list[str]`, `dict[str, str]`) rather than
+      `typing.List` / `typing.Dict`. Requires Python 3.9+; project targets 3.12.
+
+##############################################################################
+# Terraform modules
+##############################################################################
+terraform:
+  - id: TF001
+    severity: error
+    description: >
+      Every Terraform module directory must contain `main.tf`, `variables.tf`,
+      and `outputs.tf`.
+    guidance: Missing files will cause `terraform init` to fail for consumers.
+
+  - id: TF002
+    severity: error
+    description: >
+      All modules must declare the standard input variables: `team_name`,
+      `environment`, `region`, and `tags`. Azure modules must also declare
+      `location` and `resource_group_name`. GCP modules must declare `project_id`.
+    guidance: >
+      These variables are always passed by the generated root module. Missing
+      variable declarations will cause `terraform plan` to fail.
+
+  - id: TF003
+    severity: error
+    description: >
+      Security baseline modules live exclusively under
+      `terraform/modules/security/<provider>/` and must be sourced as
+      `../../terraform/modules/security/<provider>` in generated stacks.
+    guidance: Do not move or rename security baseline module directories.
+
+  - id: TF004
+    severity: warning
+    description: >
+      Terraform module source paths must use relative paths that resolve
+      correctly from the `generated/<team>/<id>/` output directory
+      (i.e., two levels deep from the repository root).
+
+  - id: TF005
+    severity: error
+    description: >
+      Do not hard-code credentials, access keys, or secrets in any `.tf` file.
+    guidance: Use provider-level credential resolution (env vars, instance roles, Workload Identity).
+
+##############################################################################
+# Rego policies
+##############################################################################
+rego:
+  - id: RG001
+    severity: error
+    description: >
+      Rego policy package names must follow the pattern `terraform.<provider>`
+      (e.g., `package terraform.aws`).
+    guidance: >
+      The conftest workflow uses `--all-namespaces`, so deviating from this
+      pattern will cause policies to be silently skipped.
+
+  - id: RG002
+    severity: error
+    description: >
+      Hard security failures must use the `deny[msg]` rule set.
+      Non-blocking advisories must use the `warn[msg]` rule set.
+      Do not use `violation[msg]` or custom rule set names.
+
+  - id: RG003
+    severity: warning
+    description: >
+      Every new Terraform resource type added to the application must have
+      corresponding `deny`/`warn` rules in the provider's `.rego` file.
+
+  - id: RG004
+    severity: warning
+    description: >
+      Rego rules that match HCL blocks (e.g., `root_block_device`,
+      `vpc_config`, `private_cluster_config`) must guard with `is_object()`
+      or `is_array()` to handle the two representations the HCL2 parser
+      may produce for single vs. multiple block occurrences.
+
+##############################################################################
+# Testing
+##############################################################################
+testing:
+  - id: TS001
+    severity: error
+    description: >
+      Every new API endpoint must have integration tests in
+      `tests/test_infrastructure_api.py` using `httpx.AsyncClient` with
+      `ASGITransport`.
+    guidance: Follow existing test patterns; mark async tests with `@pytest.mark.asyncio`.
+
+  - id: TS002
+    severity: error
+    description: >
+      Every new `TerraformGenerator` rendering path must have unit tests in
+      `tests/test_terraform_generator.py` asserting the expected HCL output.
+
+  - id: TS003
+    severity: error
+    description: >
+      Do not remove or weaken existing test assertions. Failing tests must be
+      fixed, not bypassed.
+
+  - id: TS004
+    severity: warning
+    description: >
+      New provider or resource coverage should include both a success test
+      (valid input produces expected output) and a validation test (unsupported
+      resource returns HTTP 400).
+
+##############################################################################
+# Security
+##############################################################################
+security:
+  - id: SEC001
+    severity: error
+    description: >
+      Do not commit secrets, API keys, credentials, or tokens to the repository
+      in any file.
+
+  - id: SEC002
+    severity: error
+    description: >
+      The SCA scan (Trivy), SAST scan (Bandit + Semgrep), and IaC scan (Checkov)
+      workflows must not be disabled or modified to suppress findings without
+      documented justification.
+
+  - id: SEC003
+    severity: error
+    description: >
+      Any new Python dependency added to `requirements.txt` must be checked for
+      known vulnerabilities in the GitHub Advisory Database before merging.
+
+  - id: SEC004
+    severity: warning
+    description: >
+      Generated Terraform stacks with `enable_security_baseline=true` must
+      always include the provider-specific security baseline module as the
+      first module block in `main.tf`.
+
+##############################################################################
+# General
+##############################################################################
+general:
+  - id: GEN001
+    severity: warning
+    description: >
+      Do not add comments unless they match the style of existing comments or
+      are necessary to explain a non-obvious design decision.
+
+  - id: GEN002
+    severity: info
+    description: >
+      Keep PR changes minimal and focused. Avoid refactoring code unrelated to
+      the task being addressed.
+
+  - id: GEN003
+    severity: warning
+    description: >
+      `INFRASTRUCTURE_STORE` is in-memory and resets on restart. New features
+      that require durability must introduce a persistent storage layer rather
+      than relying on the in-memory dict.
