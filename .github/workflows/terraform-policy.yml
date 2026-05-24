@@ -1,0 +1,202 @@
+name: Terraform Rego Policy Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - "terraform/**"
+      - "policies/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  terraform-policy:
+    name: Terraform – Rego Policy Validation
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.summary.outputs.result }}
+      fail_count: ${{ steps.summary.outputs.fail_count }}
+      warn_count: ${{ steps.summary.outputs.warn_count }}
+      total_count: ${{ steps.summary.outputs.total_count }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install conftest
+        run: |
+          VERSION="0.56.0"
+          curl -sSLo /tmp/conftest.tar.gz \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${VERSION}/conftest_${VERSION}_Linux_x86_64.tar.gz"
+          tar -xzf /tmp/conftest.tar.gz -C /usr/local/bin conftest
+          conftest --version
+
+      - name: Run Rego policies against Terraform files
+        id: conftest
+        run: |
+          TF_FILES=$(find terraform/ -name "*.tf" | sort | tr '\n' ' ')
+          if [ -z "$TF_FILES" ]; then
+            echo "No Terraform files found."
+            echo "[]" > /tmp/conftest-results.json
+            exit 0
+          fi
+          # shellcheck disable=SC2086
+          conftest test $TF_FILES \
+            --parser hcl2 \
+            --all-namespaces \
+            --policy policies/terraform/ \
+            --output json > /tmp/conftest-results.json 2>&1 || true
+
+      - name: Parse policy results
+        id: summary
+        run: |
+          python3 - <<'EOF'
+          import json, os
+
+          try:
+              with open("/tmp/conftest-results.json") as f:
+                  raw = f.read().strip()
+              data = json.loads(raw) if raw else []
+          except Exception:
+              data = []
+
+          findings = []
+          for result in data:
+              filename = result.get("filename", "")
+              namespace = result.get("namespace", "")
+              # Strip leading path prefix for readability
+              short_file = filename.replace("terraform/modules/", "")
+
+              for failure in result.get("failures") or []:
+                  msg = (failure.get("msg") or "")[:250]
+                  if msg:
+                      findings.append({
+                          "filename": short_file,
+                          "namespace": namespace,
+                          "severity": "❌ FAIL",
+                          "msg": msg,
+                      })
+
+              for warning in result.get("warnings") or []:
+                  msg = (warning.get("msg") or "")[:250]
+                  if msg:
+                      findings.append({
+                          "filename": short_file,
+                          "namespace": namespace,
+                          "severity": "⚠️ WARN",
+                          "msg": msg,
+                      })
+
+          fail_count = sum(1 for f in findings if "FAIL" in f["severity"])
+          warn_count = sum(1 for f in findings if "WARN" in f["severity"])
+          total_count = len(findings)
+
+          lines = []
+          if findings:
+              lines.append("| # | Severity | File | Policy Violation |")
+              lines.append("|---|----------|------|-----------------|")
+              for i, f in enumerate(findings, 1):
+                  msg = f["msg"].replace("|", "\\|").replace("\n", " ")
+                  lines.append(
+                      f"| {i} | {f['severity']} | `{f['filename']}` | {msg} |"
+                  )
+              result_text = "\n".join(lines)
+          else:
+              result_text = "_No Rego policy violations found. ✅_"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as gh_out:
+              delimiter = "EOF_POLICY"
+              gh_out.write(f"result<<{delimiter}\n{result_text}\n{delimiter}\n")
+              gh_out.write(f"fail_count={fail_count}\n")
+              gh_out.write(f"warn_count={warn_count}\n")
+              gh_out.write(f"total_count={total_count}\n")
+          EOF
+
+      - name: Upload conftest results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conftest-results
+          path: /tmp/conftest-results.json
+
+  post-pr-comment:
+    name: Post Policy Results to PR
+    runs-on: ubuntu-latest
+    needs: [terraform-policy]
+    if: always()
+    steps:
+      - name: Build and post summary comment
+        uses: actions/github-script@v7
+        env:
+          POLICY_RESULT: ${{ needs.terraform-policy.outputs.result }}
+          FAIL_COUNT: ${{ needs.terraform-policy.outputs.fail_count }}
+          WARN_COUNT: ${{ needs.terraform-policy.outputs.warn_count }}
+          TOTAL_COUNT: ${{ needs.terraform-policy.outputs.total_count }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const failCount  = parseInt(process.env.FAIL_COUNT  || "0");
+            const warnCount  = parseInt(process.env.WARN_COUNT  || "0");
+            const totalCount = parseInt(process.env.TOTAL_COUNT || "0");
+
+            const statusIcon = failCount > 0 ? "🔴" : warnCount > 0 ? "🟡" : "✅";
+            const now = new Date().toUTCString();
+
+            const body = [
+              `## 📋 Terraform Rego Policy Validation`,
+              ``,
+              `> 🕐 **Last updated:** ${now}`,
+              `> Triggered by commit \`${context.sha.slice(0,7)}\` on PR #${context.issue.number}`,
+              ``,
+              `### 📊 Summary`,
+              ``,
+              `| Status | Failures | Warnings | Total |`,
+              `|--------|----------|----------|-------|`,
+              `| ${statusIcon} | ❌ ${failCount} | ⚠️ ${warnCount} | ${totalCount} |`,
+              ``,
+              `> **Policy files:** \`policies/terraform/aws.rego\`, \`policies/terraform/gcp.rego\`, \`policies/terraform/azure.rego\``,
+              ``,
+              `---`,
+              ``,
+              `### 🔍 Detailed Findings`,
+              ``,
+              process.env.POLICY_RESULT,
+              ``,
+              `---`,
+              ``,
+              `<sub>Full JSON output is available in the [workflow run artifacts](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).</sub>`,
+            ].join("\n");
+
+            const marker = "<!-- terraform-rego-policy -->";
+            const markedBody = marker + "\n" + body;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c =>
+              c.user.type === "Bot" && c.body.startsWith(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: markedBody,
+              });
+              core.info(`Updated existing comment #${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: markedBody,
+              });
+              core.info("Created new policy scan comment");
+            }
