@@ -9,6 +9,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  security-events: write
 
 jobs:
   sca-scan:
@@ -21,7 +22,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run Trivy (SCA – filesystem)
+      - name: Run Trivy (SCA – filesystem, JSON)
         uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
@@ -30,6 +31,23 @@ jobs:
           output: ${{ runner.temp }}/sca-results.json
           scanners: vuln
           exit-code: "0"
+
+      - name: Run Trivy (SCA – filesystem, SARIF)
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: ${{ runner.temp }}/sca-results.sarif
+          scanners: vuln
+          exit-code: "0"
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: ${{ runner.temp }}/sca-results.sarif
+          category: sca-trivy
 
       - name: Parse SCA results
         id: summary
@@ -83,7 +101,9 @@ jobs:
         if: always()
         with:
           name: sca-results
-          path: ${{ runner.temp }}/sca-results.json
+          path: |
+            ${{ runner.temp }}/sca-results.json
+            ${{ runner.temp }}/sca-results.sarif
 
   sast-scan:
     name: SAST – Static Code Analysis
@@ -101,23 +121,48 @@ jobs:
           python-version: "3.12"
 
       - name: Install Bandit
-        run: pip install bandit[toml]
+        run: pip install bandit[toml] bandit-sarif-formatter
 
-      - name: Run Bandit (SAST – Python)
+      - name: Run Bandit (SAST – Python, JSON)
         id: bandit
         run: |
           bandit -r app/ -f json -o ${{ runner.temp }}/sast-bandit.json \
             --severity-level medium --confidence-level medium || true
 
+      - name: Run Bandit (SAST – Python, SARIF)
+        run: |
+          bandit -r app/ -f sarif -o ${{ runner.temp }}/sast-bandit.sarif \
+            --severity-level medium --confidence-level medium || true
+
+      - name: Upload Bandit SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: ${{ runner.temp }}/sast-bandit.sarif
+          category: sast-bandit
+
       - name: Install Semgrep
         run: pip install semgrep
 
-      - name: Run Semgrep (SAST – general)
+      - name: Run Semgrep (SAST – general, JSON)
         id: semgrep
         run: |
           semgrep scan --config=auto --json --output ${{ runner.temp }}/sast-semgrep.json \
             --severity ERROR --severity WARNING \
             app/ || true
+
+      - name: Run Semgrep (SAST – general, SARIF)
+        run: |
+          semgrep scan --config=auto --sarif --output ${{ runner.temp }}/sast-semgrep.sarif \
+            --severity ERROR --severity WARNING \
+            app/ || true
+
+      - name: Upload Semgrep SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: ${{ runner.temp }}/sast-semgrep.sarif
+          category: sast-semgrep
 
       - name: Parse SAST results
         id: summary
@@ -185,7 +230,9 @@ jobs:
           name: sast-results
           path: |
             ${{ runner.temp }}/sast-bandit.json
+            ${{ runner.temp }}/sast-bandit.sarif
             ${{ runner.temp }}/sast-semgrep.json
+            ${{ runner.temp }}/sast-semgrep.sarif
 
   iac-scan:
     name: IaC – Infrastructure as Code Scan
@@ -298,6 +345,16 @@ jobs:
             const statusIcon = (count) => count > 0 ? "🔴" : "✅";
 
             const now = new Date().toUTCString();
+
+            const details = (icon, title, count, content) => [
+              `<details${count > 0 ? " open" : ""}>`,
+              `<summary>${icon} <strong>${title}</strong> — ${statusIcon(count)} ${count} finding${count !== 1 ? "s" : ""}</summary>`,
+              ``,
+              content,
+              ``,
+              `</details>`,
+            ].join("\n");
+
             const body = [
               `## 🔍 Security Scan Results`,
               ``,
@@ -315,21 +372,11 @@ jobs:
               ``,
               `---`,
               ``,
-              `### 1️⃣ SCA – Dependency Vulnerability Scan (Trivy)`,
+              details("1️⃣", "SCA – Dependency Vulnerability Scan (Trivy)", scaCount, process.env.SCA_RESULT),
               ``,
-              process.env.SCA_RESULT,
+              details("2️⃣", "SAST – Static Code Analysis (Bandit + Semgrep)", sastCount, process.env.SAST_RESULT),
               ``,
-              `---`,
-              ``,
-              `### 2️⃣ SAST – Static Code Analysis (Bandit + Semgrep)`,
-              ``,
-              process.env.SAST_RESULT,
-              ``,
-              `---`,
-              ``,
-              `### 3️⃣ IaC – Infrastructure as Code Scan (Checkov)`,
-              ``,
-              process.env.IAC_RESULT,
+              details("3️⃣", "IaC – Infrastructure as Code Scan (Checkov)", iacCount, process.env.IAC_RESULT),
               ``,
               `---`,
               ``,
