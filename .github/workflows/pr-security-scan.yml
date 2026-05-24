@@ -454,10 +454,18 @@ jobs:
     name: Trigger Copilot Auto-Fix Workflow
     runs-on: ubuntu-latest
     needs: [sca-scan, sast-scan, iac-scan, post-pr-comment]
-    if: always()
+    if: >
+      always() &&
+      (fromJSON(needs.sca-scan.outputs.finding_count || '0') +
+       fromJSON(needs.sast-scan.outputs.finding_count || '0') +
+       fromJSON(needs.iac-scan.outputs.finding_count || '0')) > 0
     steps:
       - name: Dispatch Copilot Security Auto-Fix
         uses: actions/github-script@v7
+        env:
+          SCA_COUNT: ${{ needs.sca-scan.outputs.finding_count }}
+          SAST_COUNT: ${{ needs.sast-scan.outputs.finding_count }}
+          IAC_COUNT: ${{ needs.iac-scan.outputs.finding_count }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -471,6 +479,9 @@ jobs:
                 run_id: String(context.runId),
                 head_branch: context.payload.pull_request?.head?.ref || '',
                 head_sha: context.sha,
+                sca_count: String(process.env.SCA_COUNT || '0'),
+                sast_count: String(process.env.SAST_COUNT || '0'),
+                iac_count: String(process.env.IAC_COUNT || '0'),
               }
             });
             core.info(`Dispatched copilot-security-autofix.yml on ${ref}`);

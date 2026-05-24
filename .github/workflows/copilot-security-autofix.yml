@@ -19,6 +19,18 @@ on:
         description: "PR head sha"
         required: false
         type: string
+      sca_count:
+        description: "SCA finding count"
+        required: false
+        type: string
+      sast_count:
+        description: "SAST finding count"
+        required: false
+        type: string
+      iac_count:
+        description: "IaC finding count"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -38,7 +50,7 @@ jobs:
       - name: Checkout PR branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_branch }}
+          ref: ${{ github.event.inputs.head_branch || github.event.workflow_run.head_branch }}
           fetch-depth: 0
 
       - name: Resolve PR number and download scan artifacts
@@ -53,6 +65,9 @@ jobs:
               || context.payload.workflow_run?.id;
             const headBranch = context.payload.inputs?.head_branch
               || context.payload.workflow_run?.head_branch;
+            const scaCount = parseInt(context.payload.inputs?.sca_count || '0', 10);
+            const sastCount = parseInt(context.payload.inputs?.sast_count || '0', 10);
+            const iacCount = parseInt(context.payload.inputs?.iac_count || '0', 10);
 
             // --- 1. Resolve the pull request number ---------------------------------
             const headRepo = context.payload.workflow_run?.head_repository
@@ -74,20 +89,24 @@ jobs:
             core.setOutput('pr_number', String(prNumber));
             core.info(`Resolved PR #${prNumber}`);
 
+            const totalFromCounts = scaCount + sastCount + iacCount;
+
             // --- 2. Download *-comment.md artifacts from the triggering run ---------
             // This is more reliable than parsing the PR comment body, which may not
             // yet be visible or may show "no findings" if the artifact download failed.
-            if (!runId) {
+            if (totalFromCounts === 0 && !runId) {
               core.setOutput('has_findings', 'false');
-              core.info('No workflow run ID provided — skipping.');
+              core.info('No workflow run ID provided and counts are zero — skipping.');
               return;
             }
 
-            const { data: artifactList } = await github.rest.actions.listWorkflowRunArtifacts({
-              owner:  context.repo.owner,
-              repo:   context.repo.repo,
-              run_id: runId,
-            });
+            const artifactList = runId
+              ? (await github.rest.actions.listWorkflowRunArtifacts({
+                  owner:  context.repo.owner,
+                  repo:   context.repo.repo,
+                  run_id: runId,
+                })).data
+              : { artifacts: [] };
 
             const noFindingsPatterns = [
               '_No vulnerable dependencies found._',
@@ -104,7 +123,7 @@ jobs:
 
             fs.mkdirSync('/tmp/scan-artifacts', { recursive: true });
 
-            let totalFindings = 0;
+            let totalFindings = totalFromCounts;
             const sectionReports = {};
 
             for (const artifactName of wantedArtifacts) {
@@ -139,7 +158,7 @@ jobs:
                 sectionReports[artifactName] = content;
                 // Any content that is NOT a "no findings" message means there are findings
                 const isClean = noFindingsPatterns.some(p => content === p);
-                if (!isClean) totalFindings++;
+                if (!isClean && totalFromCounts === 0) totalFindings++;
                 core.info(`${artifactName}: ${isClean ? 'clean' : 'HAS FINDINGS'}`);
               } else {
                 core.warning(`Comment file not found in artifact: ${commentFile}`);
@@ -264,65 +283,147 @@ jobs:
             const prNumber   = process.env.PR_NUMBER;
             const headBranch = process.env.HEAD_BRANCH;
 
+            const MAX_SCAN_REPORT_CHARS = 12000;
+            const MAX_CONTEXT_CHARS = 18000;
+            const BATCH_SIZE = 10;
+            const truncate = (text, max) =>
+              text.length > max
+                ? `${text.slice(0, max)}\n\n... [truncated, ${text.length - max} chars omitted]`
+                : text;
+
+            const extractRows = (sectionText) => {
+              const lines = sectionText.split('\n');
+              return lines.filter(l => l.startsWith('|') && !l.startsWith('|---'));
+            };
+
+            const rebuildTable = (headerLines, rows) => {
+              if (!rows.length || !headerLines.length) return null;
+              return [...headerLines, ...rows].join('\n');
+            };
+
             // Read collected context files
-            const scanReport = fs.readFileSync('/tmp/scan-report.md', 'utf8');
-            const repoContext = fs.readFileSync('/tmp/repo-context.md', 'utf8');
+            const scanReport = truncate(fs.readFileSync('/tmp/scan-report.md', 'utf8'), MAX_SCAN_REPORT_CHARS);
+            const repoContext = truncate(fs.readFileSync('/tmp/repo-context.md', 'utf8'), MAX_CONTEXT_CHARS);
 
-            // Build the issue body — this is the prompt for the Copilot agent
-            const issueBody = [
-              `## Security Auto-Fix Request`,
-              ``,
-              `> Automatically generated by the **Copilot Security Auto-Fix** workflow.`,
-              `> Source PR: #${prNumber} (branch: \`${headBranch}\`)`,
-              ``,
-              `---`,
-              ``,
-              `### Instructions`,
-              ``,
-              `The **PR Security Scan** workflow detected findings on PR #${prNumber}.`,
-              `Please analyze the scan report and the repository context below, then create`,
-              `a fix PR **against the \`${headBranch}\` branch** that resolves the security`,
-              `findings. Follow the repository conventions described in the context section.`,
-              ``,
-              `**Important guidelines:**`,
-              `- Fix only the findings reported in the scan — do not refactor unrelated code.`,
-              `- For SCA (dependency) findings: update the vulnerable packages in \`requirements.txt\` to the recommended fix versions.`,
-              `- For SAST findings: apply the minimal code change that resolves the issue while preserving existing behavior.`,
-              `- For IaC findings: update the Terraform modules to comply with security best practices and the OPA Rego policies.`,
-              `- Run \`python -m pytest tests/ -v\` to verify your changes do not break existing tests.`,
-              `- Reference PR #${prNumber} in the fix PR description.`,
-              ``,
-              `---`,
-              ``,
-              `### Security Scan Report`,
-              ``,
-              scanReport,
-              ``,
-              `---`,
-              ``,
-              `### Repository Context`,
-              ``,
-              `<details>`,
-              `<summary>Click to expand full repository context</summary>`,
-              ``,
-              repoContext,
-              ``,
-              `</details>`,
-            ].join('\n');
+            // Split report into sections
+            const sections = {
+              sca: scanReport.split('### 1️⃣ SCA – Dependency Vulnerability Scan (Trivy)')[1] || '',
+              sast: scanReport.split('### 2️⃣ SAST – Static Code Analysis (Bandit + Semgrep)')[1] || '',
+              iac: scanReport.split('### 3️⃣ IaC – Infrastructure as Code Scan (Checkov)')[1] || '',
+            };
 
-            // Create the issue and assign it to Copilot
-            const { data: issue } = await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
-              title: `🔒 Security Auto-Fix: Resolve scan findings from PR #${prNumber}`,
-              body:  issueBody,
-              labels: ['security', 'copilot-autofix'],
-              assignees: ['copilot'],
-            });
+            const scaText = sections.sca.split('### 2️⃣')[0]?.trim() || '';
+            const sastText = sections.sast.split('### 3️⃣')[0]?.trim() || '';
+            const iacText = sections.iac.trim();
 
-            core.info(`Created issue #${issue.number}: ${issue.html_url}`);
+            const scaLines = scaText.split('\n');
+            const sastLines = sastText.split('\n');
+            const iacLines = iacText.split('\n');
 
-            // Post a notification comment on the original PR
+            // Capture both the column-name row AND the |---| separator row so
+            // rebuildTable emits a valid GitHub Markdown table.
+            const captureHeader = (lines, keyword) => {
+              const idx = lines.findIndex(l => l.startsWith('|') && l.includes(keyword));
+              if (idx === -1) return [];
+              // idx = column row; idx+1 = separator row (starts with |--)
+              return lines.slice(idx, idx + 2).filter(l => l.startsWith('|'));
+            };
+
+            const scaHeader  = captureHeader(scaLines,  'Package');
+            const sastHeader = captureHeader(sastLines, 'Tool');
+            const iacHeader  = captureHeader(iacLines,  'Framework');
+
+            // extractRows already excludes |--- lines; skip only the header row (index 0)
+            const scaRows  = extractRows(scaText).slice(1);
+            const sastRows = extractRows(sastText).slice(1);
+            const iacRows  = extractRows(iacText).slice(1);
+
+            const allFindings = [
+              ...scaRows.map(r => ({ section: 'sca', row: r })),
+              ...sastRows.map(r => ({ section: 'sast', row: r })),
+              ...iacRows.map(r => ({ section: 'iac', row: r })),
+            ];
+
+            const totalBatches = Math.max(1, Math.ceil(allFindings.length / BATCH_SIZE));
+            const batches = [];
+            for (let i = 0; i < totalBatches; i++) {
+              batches.push(allFindings.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE));
+            }
+
+            const issues = [];
+            for (let i = 0; i < batches.length; i++) {
+              const batch = batches[i];
+              const scaBatch = batch.filter(b => b.section === 'sca').map(b => b.row);
+              const sastBatch = batch.filter(b => b.section === 'sast').map(b => b.row);
+              const iacBatch = batch.filter(b => b.section === 'iac').map(b => b.row);
+
+              const batchReport = [
+                `### 1️⃣ SCA – Dependency Vulnerability Scan (Trivy)`,
+                ``,
+                rebuildTable(scaHeader, scaBatch) || '_No vulnerable dependencies found._',
+                ``,
+                `### 2️⃣ SAST – Static Code Analysis (Bandit + Semgrep)`,
+                ``,
+                rebuildTable(sastHeader, sastBatch) || '_No SAST findings at the configured severity thresholds._',
+                ``,
+                `### 3️⃣ IaC – Infrastructure as Code Scan (Checkov)`,
+                ``,
+                rebuildTable(iacHeader, iacBatch) || '_No IaC policy violations found._',
+              ].join('\n');
+
+              const issueBody = [
+                `## Security Auto-Fix Request (Batch ${i + 1}/${batches.length})`,
+                ``,
+                `> Automatically generated by the **Copilot Security Auto-Fix** workflow.`,
+                `> Source PR: #${prNumber} (branch: \`${headBranch}\`)`,
+                ``,
+                `---`,
+                ``,
+                `### Instructions`,
+                ``,
+                `The **PR Security Scan** workflow detected findings on PR #${prNumber}.`,
+                `This batch contains up to ${BATCH_SIZE} findings. Create a fix PR **against the \`${headBranch}\` branch**`,
+                `that resolves only the findings in this batch.`,
+                ``,
+                `**Important guidelines:**`,
+                `- Fix only the findings reported in this batch — do not refactor unrelated code.`,
+                `- For SCA (dependency) findings: update the vulnerable packages in \`requirements.txt\` to the recommended fix versions.`,
+                `- For SAST findings: apply the minimal code change that resolves the issue while preserving existing behavior.`,
+                `- For IaC findings: update the Terraform modules to comply with security best practices and the OPA Rego policies.`,
+                `- Run \`python -m pytest tests/ -v\` to verify your changes do not break existing tests.`,
+                `- Reference PR #${prNumber} in the fix PR description.`,
+                ``,
+                `---`,
+                ``,
+                `### Security Scan Report (Batch ${i + 1})`,
+                ``,
+                batchReport,
+                ``,
+                `---`,
+                ``,
+                `### Repository Context`,
+                ``,
+                `<details>`,
+                `<summary>Click to expand repository context (trimmed)</summary>`,
+                ``,
+                repoContext,
+                ``,
+                `</details>`,
+              ].join('\n');
+
+              const { data: issue } = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                title: `🔒 Security Auto-Fix (Batch ${i + 1}/${batches.length}) for PR #${prNumber}`,
+                body:  issueBody,
+                labels: ['security', 'copilot-autofix'],
+                assignees: ['copilot'],
+              });
+
+              issues.push(issue.number);
+              core.info(`Created issue #${issue.number}: ${issue.html_url}`);
+            }
+
             await github.rest.issues.createComment({
               owner:        context.repo.owner,
               repo:         context.repo.repo,
@@ -330,9 +431,9 @@ jobs:
               body: [
                 `## 🤖 Copilot Security Auto-Fix Triggered`,
                 ``,
-                `The security scan found actionable findings on this PR.`,
-                `A Copilot auto-fix task has been created: #${issue.number}`,
+                `The security scan findings were split into ${batches.length} batch(es) of up to ${BATCH_SIZE}.`,
+                `Created issues: ${issues.map(n => `#${n}`).join(', ')}`,
                 ``,
-                `Copilot will open a fix PR against \`${headBranch}\` shortly.`,
+                `Copilot will open fix PRs against \`${headBranch}\` shortly.`,
               ].join('\n'),
             });
