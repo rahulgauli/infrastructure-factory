@@ -16,7 +16,6 @@ jobs:
     name: SCA – Dependency Vulnerability Scan
     runs-on: ubuntu-latest
     outputs:
-      result: ${{ steps.summary.outputs.result }}
       finding_count: ${{ steps.summary.outputs.finding_count }}
     steps:
       - name: Checkout code
@@ -101,10 +100,11 @@ jobs:
           else:
               result = "_No vulnerable dependencies found._"
 
+          results_dir = os.environ.get("RUNNER_TEMP", "/tmp")
+          with open(os.path.join(results_dir, "sca-comment.md"), "w") as f:
+              f.write(result)
+
           with open(os.environ["GITHUB_OUTPUT"], "a") as gh_out:
-              # Use multiline delimiter for the table
-              delimiter = "EOF_SCA"
-              gh_out.write(f"result<<{delimiter}\n{result}\n{delimiter}\n")
               gh_out.write(f"finding_count={len(vulns)}\n")
           EOF
 
@@ -116,12 +116,12 @@ jobs:
           path: |
             ${{ runner.temp }}/sca-results.json
             ${{ runner.temp }}/sca-results.sarif
+            ${{ runner.temp }}/sca-comment.md
 
   sast-scan:
     name: SAST – Static Code Analysis
     runs-on: ubuntu-latest
     outputs:
-      result: ${{ steps.summary.outputs.result }}
       finding_count: ${{ steps.summary.outputs.finding_count }}
     steps:
       - name: Checkout code
@@ -229,9 +229,11 @@ jobs:
           else:
               result = "_No SAST findings at the configured severity thresholds._"
 
+          results_dir = os.environ.get("RUNNER_TEMP", "/tmp")
+          with open(os.path.join(results_dir, "sast-comment.md"), "w") as f:
+              f.write(result)
+
           with open(os.environ["GITHUB_OUTPUT"], "a") as gh_out:
-              delimiter = "EOF_SAST"
-              gh_out.write(f"result<<{delimiter}\n{result}\n{delimiter}\n")
               gh_out.write(f"finding_count={len(findings)}\n")
           EOF
 
@@ -245,12 +247,12 @@ jobs:
             ${{ runner.temp }}/sast-bandit.sarif
             ${{ runner.temp }}/sast-semgrep.json
             ${{ runner.temp }}/sast-semgrep.sarif
+            ${{ runner.temp }}/sast-comment.md
 
   iac-scan:
     name: IaC – Infrastructure as Code Scan
     runs-on: ubuntu-latest
     outputs:
-      result: ${{ steps.summary.outputs.result }}
       finding_count: ${{ steps.summary.outputs.finding_count }}
     steps:
       - name: Checkout code
@@ -318,9 +320,11 @@ jobs:
           else:
               result = "_No IaC policy violations found._"
 
+          results_dir = os.environ.get("RUNNER_TEMP", "/tmp")
+          with open(os.path.join(results_dir, "iac-comment.md"), "w") as f:
+              f.write(result)
+
           with open(os.environ["GITHUB_OUTPUT"], "a") as gh_out:
-              delimiter = "EOF_IAC"
-              gh_out.write(f"result<<{delimiter}\n{result}\n{delimiter}\n")
               gh_out.write(f"finding_count={len(findings)}\n")
           EOF
 
@@ -329,7 +333,9 @@ jobs:
         if: always()
         with:
           name: iac-results
-          path: ${{ runner.temp }}/iac-results.json
+          path: |
+            ${{ runner.temp }}/iac-results.json
+            ${{ runner.temp }}/iac-comment.md
 
   post-pr-comment:
     name: Post Scan Summary to PR
@@ -337,22 +343,38 @@ jobs:
     needs: [sca-scan, sast-scan, iac-scan]
     if: always()
     steps:
+      - name: Download scan comment artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/scan-artifacts
+
       - name: Build and post summary comment
         uses: actions/github-script@v7
         env:
-          SCA_RESULT: ${{ needs.sca-scan.outputs.result }}
           SCA_COUNT: ${{ needs.sca-scan.outputs.finding_count }}
-          SAST_RESULT: ${{ needs.sast-scan.outputs.result }}
           SAST_COUNT: ${{ needs.sast-scan.outputs.finding_count }}
-          IAC_RESULT: ${{ needs.iac-scan.outputs.result }}
           IAC_COUNT: ${{ needs.iac-scan.outputs.finding_count }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const fs = require('fs');
+
+            const readArtifact = (path) => {
+              try { return fs.readFileSync(path, 'utf8').trim(); }
+              catch { return null; }
+            };
+
             const scaCount  = parseInt(process.env.SCA_COUNT  || "0");
             const sastCount = parseInt(process.env.SAST_COUNT || "0");
             const iacCount  = parseInt(process.env.IAC_COUNT  || "0");
             const total     = scaCount + sastCount + iacCount;
+
+            const scaResult  = readArtifact('/tmp/scan-artifacts/sca-results/sca-comment.md')
+                            || '_No vulnerable dependencies found._';
+            const sastResult = readArtifact('/tmp/scan-artifacts/sast-results/sast-comment.md')
+                            || '_No SAST findings at the configured severity thresholds._';
+            const iacResult  = readArtifact('/tmp/scan-artifacts/iac-results/iac-comment.md')
+                            || '_No IaC policy violations found._';
 
             const statusIcon = (count) => count > 0 ? "🔴" : "✅";
 
@@ -384,11 +406,11 @@ jobs:
               ``,
               `---`,
               ``,
-              details("1️⃣", "SCA – Dependency Vulnerability Scan (Trivy)", scaCount, process.env.SCA_RESULT),
+              details("1️⃣", "SCA – Dependency Vulnerability Scan (Trivy)", scaCount, scaResult),
               ``,
-              details("2️⃣", "SAST – Static Code Analysis (Bandit + Semgrep)", sastCount, process.env.SAST_RESULT),
+              details("2️⃣", "SAST – Static Code Analysis (Bandit + Semgrep)", sastCount, sastResult),
               ``,
-              details("3️⃣", "IaC – Infrastructure as Code Scan (Checkov)", iacCount, process.env.IAC_RESULT),
+              details("3️⃣", "IaC – Infrastructure as Code Scan (Checkov)", iacCount, iacResult),
               ``,
               `---`,
               ``,
