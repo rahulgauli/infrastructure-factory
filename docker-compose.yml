@@ -1,0 +1,11 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=true
+      - GENERATED_DIR=/app/generated
+    volumes:
+      - ./generated:/app/generated
+    restart: unless-stopped
