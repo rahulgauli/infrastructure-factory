@@ -2,7 +2,7 @@ locals {
   queue_name = substr(
     regexreplace("${var.team_name}-${var.environment}-sqs", "[^a-zA-Z0-9_-]", "-"),
     0,
-    80,
+    76,
   )
   dlq_name = "${local.queue_name}-dlq"
   common_tags = merge(var.tags, {
