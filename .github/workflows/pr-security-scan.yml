@@ -106,7 +106,7 @@ jobs:
       - name: Run Bandit (SAST – Python)
         id: bandit
         run: |
-          bandit -r app/ -f json -o /tmp/sast-bandit.json \
+          bandit -r app/ -f json -o ${{ runner.temp }}/sast-bandit.json \
             --severity-level medium --confidence-level medium || true
 
       - name: Install Semgrep
@@ -115,7 +115,7 @@ jobs:
       - name: Run Semgrep (SAST – general)
         id: semgrep
         run: |
-          semgrep scan --config=auto --json --output /tmp/sast-semgrep.json \
+          semgrep scan --config=auto --json --output ${{ runner.temp }}/sast-semgrep.json \
             --severity ERROR --severity WARNING \
             app/ || true
 
@@ -127,9 +127,11 @@ jobs:
 
           findings = []
 
+          runner_temp = os.environ.get("RUNNER_TEMP", "/tmp")
+
           # Bandit results
           try:
-              with open("/tmp/sast-bandit.json") as f:
+              with open(os.path.join(runner_temp, "sast-bandit.json")) as f:
                   bandit_data = json.load(f)
               for issue in bandit_data.get("results", []):
                   findings.append({
@@ -144,7 +146,7 @@ jobs:
 
           # Semgrep results
           try:
-              with open("/tmp/sast-semgrep.json") as f:
+              with open(os.path.join(runner_temp, "sast-semgrep.json")) as f:
                   semgrep_data = json.load(f)
               for r in semgrep_data.get("results", []):
                   findings.append({
@@ -182,8 +184,8 @@ jobs:
         with:
           name: sast-results
           path: |
-            /tmp/sast-bandit.json
-            /tmp/sast-semgrep.json
+            ${{ runner.temp }}/sast-bandit.json
+            ${{ runner.temp }}/sast-semgrep.json
 
   iac-scan:
     name: IaC – Infrastructure as Code Scan
@@ -209,9 +211,8 @@ jobs:
           checkov -d . \
             --framework terraform dockerfile \
             --output json \
-            --output-file /tmp/iac-results.json \
             --compact \
-            --quiet || true
+            --quiet > ${{ runner.temp }}/iac-results.json || true
 
       - name: Parse IaC results
         id: summary
@@ -220,48 +221,39 @@ jobs:
           import json, os
 
           findings = []
+          results_path = os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "iac-results.json")
 
           try:
-              with open("/tmp/iac-results.json") as f:
-                  raw = f.read().strip()
-              # Checkov may emit one JSON object per framework; handle both list and dict
-              try:
-                  data = json.loads(raw)
-              except json.JSONDecodeError:
-                  # Multiple JSON objects concatenated – split on top-level boundaries
-                  import re
-                  sections = [m for m in re.split(r'\n(?=\{)', raw) if m.strip()]
-                  data = []
-                  for s in sections:
-                      try:
-                          data.append(json.loads(s))
-                      except json.JSONDecodeError:
-                          pass
+              with open(results_path) as f:
+                  data = json.load(f)
 
+              # Output is a list when multiple frameworks are scanned, dict for a single one
               if isinstance(data, dict):
                   data = [data]
 
               for section in data:
+                  framework = section.get("check_type", "terraform")
                   for check in section.get("results", {}).get("failed_checks", []):
+                      line_range = check.get("file_line_range") or ["?", "?"]
                       findings.append({
-                          "framework": section.get("check_type", "terraform"),
-                          "severity": check.get("severity") or "MEDIUM",
+                          "framework": framework,
                           "check_id": check.get("check_id", ""),
+                          "check_name": (check.get("check_name") or "")[:80],
                           "resource": check.get("resource", ""),
-                          "location": f"{check.get('repo_file_path','')}: lines {check.get('file_line_range',['?','?'])[0]}–{check.get('file_line_range',['?','?'])[-1]}",
-                          "guideline": (check.get("guideline") or "")[:120],
+                          "location": f"{check.get('repo_file_path', '')}: L{line_range[0]}-{line_range[-1]}",
+                          "guideline": (check.get("guideline") or "")[:100],
                       })
           except Exception as e:
-              pass
+              print(f"Warning: could not parse IaC results: {e}")
 
           lines = []
           if findings:
-              lines.append("| # | Framework | Severity | Check ID | Resource | Location | Guideline |")
-              lines.append("|---|-----------|----------|----------|----------|----------|-----------|")
+              lines.append("| # | Framework | Check ID | Check Name | Resource | Location |")
+              lines.append("|---|-----------|----------|------------|----------|----------|")
               for i, f in enumerate(findings, 1):
-                  guide = f["guideline"].replace("|", "\\|").replace("\n", " ")
+                  name = f["check_name"].replace("|", "\\|").replace("\n", " ")
                   lines.append(
-                      f"| {i} | {f['framework']} | {f['severity']} | `{f['check_id']}` | `{f['resource']}` | `{f['location']}` | {guide} |"
+                      f"| {i} | {f['framework']} | `{f['check_id']}` | {name} | `{f['resource']}` | `{f['location']}` |"
                   )
               result = "\n".join(lines)
           else:
@@ -278,7 +270,7 @@ jobs:
         if: always()
         with:
           name: iac-results
-          path: /tmp/iac-results.json
+          path: ${{ runner.temp }}/iac-results.json
 
   post-pr-comment:
     name: Post Scan Summary to PR
