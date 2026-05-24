@@ -5,6 +5,20 @@ on:
     workflows: ["PR Security Scan"]
     types:
       - completed
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Workflow run ID from PR Security Scan"
+        required: false
+        type: string
+      head_branch:
+        description: "PR head branch"
+        required: false
+        type: string
+      head_sha:
+        description: "PR head sha"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -17,8 +31,9 @@ jobs:
     name: Trigger Copilot Auto-Fix for Security Findings
     runs-on: ubuntu-latest
     if: >-
-      github.event.workflow_run.conclusion != 'cancelled'
-      && github.event.workflow_run.event == 'pull_request'
+      github.event_name == 'workflow_dispatch'
+      || (github.event.workflow_run.conclusion != 'cancelled'
+          && github.event.workflow_run.event == 'pull_request')
     steps:
       - name: Checkout PR branch
         uses: actions/checkout@v4
@@ -34,16 +49,20 @@ jobs:
           script: |
             const fs   = require('fs');
             const path = require('path');
-            const runId = context.payload.workflow_run.id;
+            const runId = context.payload.inputs?.run_id
+              || context.payload.workflow_run?.id;
+            const headBranch = context.payload.inputs?.head_branch
+              || context.payload.workflow_run?.head_branch;
 
             // --- 1. Resolve the pull request number ---------------------------------
-            const headRepo = context.payload.workflow_run.head_repository;
+            const headRepo = context.payload.workflow_run?.head_repository
+              || context.repo;
 
             const { data: pulls } = await github.rest.pulls.list({
               owner: context.repo.owner,
               repo:  context.repo.repo,
               state: 'open',
-              head:  `${headRepo.owner.login}:${context.payload.workflow_run.head_branch}`,
+              head:  `${headRepo.owner.login}:${headBranch}`,
             });
 
             if (!pulls.length) {
@@ -58,6 +77,12 @@ jobs:
             // --- 2. Download *-comment.md artifacts from the triggering run ---------
             // This is more reliable than parsing the PR comment body, which may not
             // yet be visible or may show "no findings" if the artifact download failed.
+            if (!runId) {
+              core.setOutput('has_findings', 'false');
+              core.info('No workflow run ID provided — skipping.');
+              return;
+            }
+
             const { data: artifactList } = await github.rest.actions.listWorkflowRunArtifacts({
               owner:  context.repo.owner,
               repo:   context.repo.repo,
@@ -230,7 +255,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           PR_NUMBER: ${{ steps.context.outputs.pr_number }}
-          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_BRANCH: ${{ github.event.inputs.head_branch || github.event.workflow_run.head_branch }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
