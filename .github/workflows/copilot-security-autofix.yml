@@ -283,8 +283,9 @@ jobs:
             const prNumber   = process.env.PR_NUMBER;
             const headBranch = process.env.HEAD_BRANCH;
 
-            const MAX_SCAN_REPORT_CHARS = 12000;
-            const MAX_CONTEXT_CHARS = 18000;
+            const MAX_SCAN_REPORT_CHARS = 8000;
+            const MAX_CONTEXT_CHARS = 10000;
+            const MAX_ISSUE_BODY_CHARS = 60000; // GitHub hard limit is 65536
             const BATCH_SIZE = 10;
             const truncate = (text, max) =>
               text.length > max
@@ -428,7 +429,7 @@ jobs:
                 owner: context.repo.owner,
                 repo:  context.repo.repo,
                 title: `🔒 Security Auto-Fix (Batch ${i + 1}/${batches.length}) for PR #${prNumber}`,
-                body:  issueBody,
+                body:  truncate(issueBody, MAX_ISSUE_BODY_CHARS),
                 labels: ['security', 'copilot-autofix'],
                 assignees: ['copilot'],
               });
