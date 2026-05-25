@@ -411,6 +411,19 @@ jobs:
                 `</details>`,
               ].join('\n');
 
+              // Ensure labels exist (create them if missing — ignore errors if they already exist)
+              for (const [name, color, description] of [
+                ['security',        'e11d48', 'Security findings'],
+                ['copilot-autofix', '6e40c9', 'Copilot auto-fix request'],
+              ]) {
+                try {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner, repo: context.repo.repo,
+                    name, color, description,
+                  });
+                } catch { /* label already exists — that's fine */ }
+              }
+
               const { data: issue } = await github.rest.issues.create({
                 owner: context.repo.owner,
                 repo:  context.repo.repo,
@@ -419,6 +432,13 @@ jobs:
                 labels: ['security', 'copilot-autofix'],
                 assignees: ['copilot'],
               });
+
+              // Assigning 'copilot' requires "Copilot on Issues" to be enabled in repo
+              // Settings → General → Copilot. If the assignment was silently dropped
+              // (GitHub ignores unknown assignees rather than erroring), log a warning.
+              if (!issue.assignees?.some(a => a.login === 'copilot')) {
+                core.warning(`Issue #${issue.number}: 'copilot' was not assigned. Enable "Copilot on Issues" in repo Settings → General → Copilot.`);
+              }
 
               issues.push(issue.number);
               core.info(`Created issue #${issue.number}: ${issue.html_url}`);
