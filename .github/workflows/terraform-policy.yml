@@ -44,18 +44,18 @@ jobs:
             exit 0
           fi
           # shellcheck disable=SC2086
-          # First pass: JSON output for parsing (suppressed exit code so the step continues)
+          # Capture JSON for PR comment parsing; preserve exit code to fail the job.
           conftest test $TF_FILES \
             --parser hcl2 \
             --all-namespaces \
             --policy policies/terraform/ \
-            --output json > /tmp/conftest-results.json 2>&1 || true
-          # Second pass: capture real exit code (non-zero = deny failures exist)
+            --output json 2>&1 | tee /tmp/conftest-results.json
+          # tee above always exits 0; re-run without output to get the real exit code.
           conftest test $TF_FILES \
             --parser hcl2 \
             --all-namespaces \
             --policy policies/terraform/ \
-            --no-color > /dev/null 2>&1 && echo "conftest_exit=0" >> "$GITHUB_OUTPUT" || echo "conftest_exit=1" >> "$GITHUB_OUTPUT"
+            --output stdout 2>&1
 
       - name: Parse policy results
         id: summary
@@ -128,17 +128,6 @@ jobs:
         with:
           name: conftest-results
           path: /tmp/conftest-results.json
-
-      - name: Fail job on policy violations
-        if: always()
-        run: |
-          FAIL_COUNT="${{ steps.summary.outputs.fail_count }}"
-          CONFTEST_EXIT="${{ steps.conftest.outputs.conftest_exit }}"
-          if [ "${CONFTEST_EXIT:-0}" -ne 0 ] || [ "${FAIL_COUNT:-0}" -gt 0 ]; then
-            echo "❌ ${FAIL_COUNT} Rego policy deny violation(s) detected. See the PR comment for details."
-            exit 1
-          fi
-          echo "✅ No Rego policy violations."
 
   post-pr-comment:
     name: Post Policy Results to PR
