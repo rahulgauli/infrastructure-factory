@@ -25,6 +25,12 @@ variable "allowed_cidr" {
   default     = "10.0.0.0/8"
 }
 
+variable "db_parameter_group_family" {
+  description = "The DB parameter group family (e.g. postgres15, postgres16)"
+  type        = string
+  default     = "postgres15"
+}
+
 variable "tags" {
   description = "Common tags applied to the database"
   type        = map(string)
