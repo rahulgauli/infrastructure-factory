@@ -183,6 +183,15 @@ warn[msg] {
 	)
 }
 
+# ── SQS ──────────────────────────────────────────────────────────────────────
+
+
+warn[msg] {
+	queue := input.resource.aws_sqs_queue[name]
+	not queue.redrive_policy
+	msg := sprintf("aws_sqs_queue.%s: redrive_policy should be configured to route failed messages to a dead-letter queue", [name])
+}
+
 # ── CloudTrail ───────────────────────────────────────────────────────────────
 
 deny[msg] {

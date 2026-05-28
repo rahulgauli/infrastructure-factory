@@ -1,6 +1,6 @@
 # Infrastructure Factory
 
-Infrastructure Factory is a FastAPI service that generates opinionated Terraform stacks for AWS, GCP, and Azure. It is designed for enterprise platform teams that need self-service infrastructure generation while guaranteeing that every stack inherits centralized security controls.
+Infrastructure as Factory is a FastAPI service that generates opinionated Terraform stacks for AWS, GCP, and Azure. It is designed for enterprise platform teams that need self-service infrastructure generation while guaranteeing that every stack inherits centralized security controls.
 
 ## Architecture
 

@@ -11,6 +11,7 @@ SUPPORTED_PROVIDER_RESOURCES: dict[CloudProvider, list[ResourceType]] = {
         ResourceType.S3,
         ResourceType.RDS,
         ResourceType.EKS,
+        ResourceType.SQS,
     ],
     CloudProvider.GCP: [
         ResourceType.VPC,
