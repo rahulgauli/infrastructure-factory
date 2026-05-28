@@ -47,9 +47,10 @@ resource "aws_security_group" "this" {
   }
 
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    description = "Allow HTTPS outbound"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
@@ -58,14 +59,46 @@ resource "aws_security_group" "this" {
   })
 }
 
+resource "aws_iam_role" "instance" {
+  name_prefix = "${local.instance_name}-"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_instance_profile" "instance" {
+  name_prefix = "${local.instance_name}-"
+  role        = aws_iam_role.instance.name
+
+  tags = local.common_tags
+}
+
 resource "aws_instance" "this" {
   ami                         = data.aws_ami.amazon_linux.id
   instance_type               = var.instance_type
   subnet_id                   = data.aws_subnets.default.ids[0]
   vpc_security_group_ids      = [aws_security_group.this.id]
+  iam_instance_profile        = aws_iam_instance_profile.instance.name
   monitoring                  = true
   ebs_optimized               = true
   associate_public_ip_address = false
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+  }
 
   root_block_device {
     encrypted   = true
