@@ -44,11 +44,18 @@ jobs:
             exit 0
           fi
           # shellcheck disable=SC2086
+          # Capture JSON for PR comment parsing; preserve exit code to fail the job.
           conftest test $TF_FILES \
             --parser hcl2 \
             --all-namespaces \
             --policy policies/terraform/ \
-            --output json > /tmp/conftest-results.json 2>&1 || true
+            --output json 2>&1 | tee /tmp/conftest-results.json
+          # tee above always exits 0; re-run without output to get the real exit code.
+          conftest test $TF_FILES \
+            --parser hcl2 \
+            --all-namespaces \
+            --policy policies/terraform/ \
+            --output stdout 2>&1
 
       - name: Parse policy results
         id: summary
