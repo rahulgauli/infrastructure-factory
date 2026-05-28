@@ -1,0 +1,331 @@
+name: Copilot Rego Policy Auto-Fix
+
+on:
+  workflow_run:
+    workflows: ["Terraform Rego Policy Validation"]
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Workflow run ID from Terraform Rego Policy Validation"
+        required: false
+        type: string
+      head_branch:
+        description: "PR head branch to fix against"
+        required: false
+        type: string
+      head_sha:
+        description: "PR head SHA"
+        required: false
+        type: string
+      pr_number:
+        description: "PR number to comment on"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  actions: read
+
+jobs:
+  copilot-rego-fix:
+    name: Create Copilot Fix Issue for Rego Policy Violations
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event.workflow_run.conclusion == 'failure'
+          && github.event.workflow_run.event == 'pull_request')
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.head_branch || github.event.workflow_run.head_branch || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve PR and download policy results
+        id: context
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs   = require('fs');
+            const path = require('path');
+
+            const runId      = context.payload.inputs?.run_id      || String(context.payload.workflow_run?.id || '');
+            const headBranch = context.payload.inputs?.head_branch || context.payload.workflow_run?.head_branch || '';
+
+            // ── 1. Resolve PR number ─────────────────────────────────────────
+            let prNumber = parseInt(context.payload.inputs?.pr_number || '0', 10) || null;
+
+            if (!prNumber && headBranch) {
+              const headOwner = context.payload.workflow_run?.head_repository?.owner?.login
+                || context.repo.owner;
+              const { data: pulls } = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                state: 'open',
+                head:  `${headOwner}:${headBranch}`,
+              });
+              prNumber = pulls[0]?.number || null;
+            }
+
+            if (!prNumber) {
+              core.setOutput('has_violations', 'false');
+              core.info('No PR number resolved — skipping.');
+              return;
+            }
+            core.setOutput('pr_number', String(prNumber));
+            core.info(`Resolved PR #${prNumber}`);
+
+            // ── 2. Download conftest-results artifact ────────────────────────
+            if (!runId) {
+              core.setOutput('has_violations', 'false');
+              core.info('No run_id available — skipping artifact download.');
+              return;
+            }
+
+            const { data: artifactList } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner:  context.repo.owner,
+              repo:   context.repo.repo,
+              run_id: runId,
+            });
+
+            const artifact = artifactList.artifacts.find(a => a.name === 'conftest-results');
+            if (!artifact) {
+              core.setOutput('has_violations', 'false');
+              core.warning('conftest-results artifact not found — skipping.');
+              return;
+            }
+
+            const { data: zipData } = await github.rest.actions.downloadArtifact({
+              owner:          context.repo.owner,
+              repo:           context.repo.repo,
+              artifact_id:    artifact.id,
+              archive_format: 'zip',
+            });
+
+            const { execSync } = require('child_process');
+            fs.mkdirSync('/tmp/policy-artifacts', { recursive: true });
+            fs.writeFileSync('/tmp/policy-artifacts/conftest-results.zip', Buffer.from(zipData));
+            execSync('unzip -o /tmp/policy-artifacts/conftest-results.zip -d /tmp/policy-artifacts');
+
+            // ── 3. Parse violations ──────────────────────────────────────────
+            let data = [];
+            try {
+              const raw = fs.readFileSync('/tmp/policy-artifacts/conftest-results.json', 'utf8').trim();
+              data = raw ? JSON.parse(raw) : [];
+            } catch (e) {
+              core.warning(`Could not parse conftest-results.json: ${e.message}`);
+            }
+
+            const failures = [];
+            const warnings = [];
+            for (const result of data) {
+              const shortFile = (result.filename || '').replace('terraform/modules/', '');
+              for (const f of result.failures || []) {
+                const msg = (f.msg || '').slice(0, 300);
+                if (msg) failures.push({ file: shortFile, msg });
+              }
+              for (const w of result.warnings || []) {
+                const msg = (w.msg || '').slice(0, 300);
+                if (msg) warnings.push({ file: shortFile, msg });
+              }
+            }
+
+            if (!failures.length && !warnings.length) {
+              core.setOutput('has_violations', 'false');
+              core.info('No violations found in artifact — skipping.');
+              return;
+            }
+
+            core.setOutput('has_violations', 'true');
+            core.setOutput('fail_count', String(failures.length));
+            core.setOutput('warn_count', String(warnings.length));
+
+            // ── 4. Build violations report ───────────────────────────────────
+            const failRows = failures.map((f, i) =>
+              `| ${i + 1} | ❌ FAIL | \`${f.file}\` | ${f.msg.replace(/\|/g, '\\|').replace(/\n/g, ' ')} |`
+            );
+            const warnRows = warnings.map((w, i) =>
+              `| ${failures.length + i + 1} | ⚠️ WARN | \`${w.file}\` | ${w.msg.replace(/\|/g, '\\|').replace(/\n/g, ' ')} |`
+            );
+
+            const table = [
+              '| # | Severity | File | Violation |',
+              '|---|----------|------|-----------|',
+              ...failRows,
+              ...warnRows,
+            ].join('\n');
+
+            fs.writeFileSync('/tmp/policy-violations.md', table);
+            core.info(`Violations report written (${failures.length} failures, ${warnings.length} warnings).`);
+
+      - name: Collect Rego policy context
+        if: steps.context.outputs.has_violations == 'true'
+        run: |
+          CONTEXT_FILE="/tmp/rego-context.md"
+          {
+            echo "# Repository Context for Rego Policy Fix"
+            echo ""
+
+            echo "## Copilot Instructions"
+            echo ""
+            if [ -f .github/copilot-instructions.md ]; then
+              cat .github/copilot-instructions.md
+            fi
+            echo ""
+            echo "---"
+            echo ""
+
+            echo "## OPA Rego Policies"
+            echo ""
+            for f in policies/terraform/*.rego; do
+              [ -f "$f" ] || continue
+              echo "### $(basename "$f")"
+              echo ""
+              echo '```rego'
+              cat "$f"
+              echo '```'
+              echo ""
+            done
+
+            echo "---"
+            echo ""
+
+            echo "## Affected Terraform Modules (trimmed)"
+            echo ""
+            for tf in terraform/modules/**/*.tf; do
+              [ -f "$tf" ] || continue
+              echo "### $tf"
+              echo ""
+              echo '```hcl'
+              head -80 "$tf"
+              echo '```'
+              echo ""
+            done
+          } > "$CONTEXT_FILE"
+          echo "Context written ($(wc -c < "$CONTEXT_FILE") bytes)."
+
+      - name: Create Copilot fix issue
+        if: steps.context.outputs.has_violations == 'true'
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER:   ${{ steps.context.outputs.pr_number }}
+          HEAD_BRANCH: ${{ github.event.inputs.head_branch || github.event.workflow_run.head_branch }}
+          FAIL_COUNT:  ${{ steps.context.outputs.fail_count }}
+          WARN_COUNT:  ${{ steps.context.outputs.warn_count }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+
+            const prNumber   = process.env.PR_NUMBER;
+            const headBranch = process.env.HEAD_BRANCH;
+            const failCount  = process.env.FAIL_COUNT || '0';
+            const warnCount  = process.env.WARN_COUNT || '0';
+
+            const MAX_VIOLATIONS_CHARS = 20000;
+            const MAX_CONTEXT_CHARS    = 15000;
+            const MAX_BODY_CHARS       = 60000;
+
+            const truncate = (text, max) =>
+              text.length > max
+                ? `${text.slice(0, max)}\n\n... [truncated, ${text.length - max} chars omitted]`
+                : text;
+
+            const violationsTable = truncate(
+              fs.readFileSync('/tmp/policy-violations.md', 'utf8'), MAX_VIOLATIONS_CHARS
+            );
+            const repoContext = truncate(
+              fs.readFileSync('/tmp/rego-context.md', 'utf8'), MAX_CONTEXT_CHARS
+            );
+
+            const issueBody = [
+              `## 🔏 Rego Policy Fix Request for PR #${prNumber}`,
+              ``,
+              `> Automatically generated by the **Copilot Rego Policy Auto-Fix** workflow.`,
+              `> Source PR: #${prNumber} | Branch: \`${headBranch}\``,
+              ``,
+              `---`,
+              ``,
+              `### What happened`,
+              ``,
+              `The **Terraform Rego Policy Validation** check failed on PR #${prNumber} with **${failCount} deny violation(s)** and **${warnCount} warning(s)**.`,
+              `All violations must be resolved before this PR can be merged.`,
+              ``,
+              `---`,
+              ``,
+              `### Instructions`,
+              ``,
+              `Create a fix commit **directly on the \`${headBranch}\` branch** that resolves every ❌ FAIL violation below.`,
+              ``,
+              `**Guidelines:**`,
+              `- Fix only the Terraform resources listed — do not refactor unrelated modules.`,
+              `- Each \`deny\` rule in the Rego policies (included below) describes exactly what attribute must be set.`,
+              `- After fixing, the \`conftest\` check must pass: zero \`deny\` failures.`,
+              `- ⚠️ WARN violations are advisory — resolve them if straightforward, otherwise leave a comment explaining why not.`,
+              `- Run \`python -m pytest tests/ -v\` to verify no application tests are broken.`,
+              ``,
+              `---`,
+              ``,
+              `### Policy Violations`,
+              ``,
+              violationsTable,
+              ``,
+              `---`,
+              ``,
+              `### Repository Context (Rego policies + affected modules)`,
+              ``,
+              `<details>`,
+              `<summary>Click to expand</summary>`,
+              ``,
+              repoContext,
+              ``,
+              `</details>`,
+            ].join('\n');
+
+            // Ensure labels exist
+            for (const [name, color, description] of [
+              ['rego-policy',     'd97706', 'OPA Rego policy violation'],
+              ['copilot-autofix', '6e40c9', 'Copilot auto-fix request'],
+            ]) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  name, color, description,
+                });
+              } catch { /* already exists */ }
+            }
+
+            const { data: issue } = await github.rest.issues.create({
+              owner:  context.repo.owner,
+              repo:   context.repo.repo,
+              title:  `🔏 Rego Policy Fix for PR #${prNumber} — ${failCount} violation(s) on \`${headBranch}\``,
+              body:   truncate(issueBody, MAX_BODY_CHARS),
+              labels: ['rego-policy', 'copilot-autofix'],
+              assignees: ['copilot'],
+            });
+
+            if (!issue.assignees?.some(a => a.login === 'copilot')) {
+              core.warning(`Issue #${issue.number}: 'copilot' not assigned — enable "Copilot on Issues" in repo Settings.`);
+            }
+
+            core.info(`Created issue #${issue.number}: ${issue.html_url}`);
+
+            // Post a comment on the PR pointing to the fix issue
+            await github.rest.issues.createComment({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: parseInt(prNumber),
+              body: [
+                `## 🔏 Rego Policy Violations — Auto-Fix Requested`,
+                ``,
+                `The **Terraform Rego Policy Validation** check failed with **${failCount} deny violation(s)**.`,
+                ``,
+                `A fix issue has been created: #${issue.number}`,
+                `Copilot will push a fix commit to \`${headBranch}\` shortly.`,
+              ].join('\n'),
+            });
