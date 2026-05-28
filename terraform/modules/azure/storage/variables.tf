@@ -28,3 +28,8 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "private_endpoint_subnet_id" {
+  description = "Subnet ID for the storage account private endpoint"
+  type        = string
+}

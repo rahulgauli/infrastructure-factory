@@ -37,7 +37,9 @@ resource "azurerm_kubernetes_cluster" "this" {
     enable_auto_scaling  = true
     min_count            = 1
     max_count            = 3
+    max_pods             = 50
     orchestrator_version = var.kubernetes_version
+    os_disk_type         = "Ephemeral"
   }
 
   identity {
@@ -46,6 +48,8 @@ resource "azurerm_kubernetes_cluster" "this" {
 
   role_based_access_control_enabled = true
   oidc_issuer_enabled               = true
+  local_account_disabled            = true
+  azure_policy_enabled              = true
 
   azure_active_directory_role_based_access_control {
     managed            = true
@@ -60,5 +64,9 @@ resource "azurerm_kubernetes_cluster" "this" {
 
   oms_agent {
     log_analytics_workspace_id = azurerm_log_analytics_workspace.this.id
+  }
+
+  key_vault_secrets_provider {
+    secret_rotation_enabled = true
   }
 }
