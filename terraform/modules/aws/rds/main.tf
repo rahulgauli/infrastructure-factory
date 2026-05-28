@@ -33,10 +33,11 @@ resource "aws_security_group" "this" {
   }
 
   egress {
+    description = "Allow outbound within VPC"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [data.aws_vpc.default.cidr_block]
   }
 
   tags = merge(local.common_tags, {
@@ -54,28 +55,31 @@ resource "aws_db_subnet_group" "this" {
 }
 
 resource "aws_db_instance" "this" {
-  identifier                   = substr(regexreplace("${local.name_prefix}-postgres", "[^a-z0-9-]", "-"), 0, 63)
-  engine                       = "postgres"
-  engine_version               = "15.5"
-  instance_class               = var.instance_class
-  allocated_storage            = 20
-  max_allocated_storage        = 100
-  db_name                      = local.db_name
-  username                     = "dbadmin"
-  manage_master_user_password  = true
-  storage_encrypted            = true
-  backup_retention_period      = 7
-  deletion_protection          = true
-  publicly_accessible          = false
-  multi_az                     = false
-  storage_type                 = "gp3"
-  db_subnet_group_name         = aws_db_subnet_group.this.name
-  vpc_security_group_ids       = [aws_security_group.this.id]
-  skip_final_snapshot          = false
-  final_snapshot_identifier    = substr(regexreplace("${local.name_prefix}-final", "[^a-z0-9-]", "-"), 0, 63)
-  apply_immediately            = true
-  copy_tags_to_snapshot        = true
-  performance_insights_enabled = true
+  identifier                        = substr(regexreplace("${local.name_prefix}-postgres", "[^a-z0-9-]", "-"), 0, 63)
+  engine                            = "postgres"
+  engine_version                    = "15.5"
+  instance_class                    = var.instance_class
+  allocated_storage                 = 20
+  max_allocated_storage             = 100
+  db_name                           = local.db_name
+  username                          = "dbadmin"
+  manage_master_user_password       = true
+  storage_encrypted                 = true
+  backup_retention_period           = 7
+  deletion_protection               = true
+  publicly_accessible               = false
+  multi_az                          = false
+  storage_type                      = "gp3"
+  db_subnet_group_name              = aws_db_subnet_group.this.name
+  vpc_security_group_ids            = [aws_security_group.this.id]
+  skip_final_snapshot               = false
+  final_snapshot_identifier         = substr(regexreplace("${local.name_prefix}-final", "[^a-z0-9-]", "-"), 0, 63)
+  apply_immediately                 = true
+  copy_tags_to_snapshot             = true
+  auto_minor_version_upgrade        = true
+  iam_database_authentication_enabled = true
+  performance_insights_enabled      = true
+  performance_insights_kms_key_id   = var.performance_insights_kms_key_id
 
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-postgres"

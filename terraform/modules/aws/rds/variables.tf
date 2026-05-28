@@ -25,6 +25,11 @@ variable "allowed_cidr" {
   default     = "10.0.0.0/8"
 }
 
+variable "performance_insights_kms_key_id" {
+  description = "ARN of the KMS key used to encrypt RDS Performance Insights data"
+  type        = string
+}
+
 variable "tags" {
   description = "Common tags applied to the database"
   type        = map(string)

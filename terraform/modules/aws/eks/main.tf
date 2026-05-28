@@ -94,6 +94,13 @@ resource "aws_eks_cluster" "this" {
     endpoint_public_access  = false
   }
 
+  encryption_config {
+    resources = ["secrets"]
+    provider {
+      key_arn = var.kms_key_arn
+    }
+  }
+
   tags = local.common_tags
 
   depends_on = [

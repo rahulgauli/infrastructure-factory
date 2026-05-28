@@ -25,6 +25,11 @@ variable "node_instance_type" {
   default     = "t3.medium"
 }
 
+variable "kms_key_arn" {
+  description = "ARN of the KMS key used to encrypt EKS secrets"
+  type        = string
+}
+
 variable "tags" {
   description = "Common tags applied to the cluster"
   type        = map(string)
