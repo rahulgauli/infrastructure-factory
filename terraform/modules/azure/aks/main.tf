@@ -30,14 +30,21 @@ resource "azurerm_kubernetes_cluster" "this" {
   kubernetes_version  = var.kubernetes_version
   tags                = local.tags
 
+  automatic_channel_upgrade           = var.automatic_channel_upgrade
+  private_cluster_enabled             = true
+  disk_encryption_set_id              = var.disk_encryption_set_id
+  sku_tier                            = "Standard"
+
   default_node_pool {
-    name                 = "system"
-    vm_size              = var.node_vm_size
-    node_count           = 1
-    enable_auto_scaling  = true
-    min_count            = 1
-    max_count            = 3
-    orchestrator_version = var.kubernetes_version
+    name                        = "system"
+    vm_size                     = var.node_vm_size
+    node_count                  = 1
+    enable_auto_scaling         = true
+    min_count                   = 1
+    max_count                   = 3
+    orchestrator_version        = var.kubernetes_version
+    only_critical_addons_enabled = true
+    encryption_at_host_enabled  = true
   }
 
   identity {

@@ -40,3 +40,21 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "automatic_channel_upgrade" {
+  description = "Upgrade channel for AKS (none, patch, rapid, stable, node-image)"
+  type        = string
+  default     = "patch"
+}
+
+variable "api_server_authorized_ip_ranges" {
+  description = "CIDR ranges authorized to access the AKS API server"
+  type        = list(string)
+  default     = []
+}
+
+variable "disk_encryption_set_id" {
+  description = "Resource ID of the disk encryption set used to encrypt AKS node OS disks"
+  type        = string
+  default     = null
+}
